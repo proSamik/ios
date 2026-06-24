@@ -190,7 +190,7 @@ struct StartJobRequest: Encodable {
     let templateId: String
     let aspectRatio: String
     let placement: String
-    let faceTrack: Bool
+    let faceTrack: Bool?
     let outputFileName: String?
 }
 

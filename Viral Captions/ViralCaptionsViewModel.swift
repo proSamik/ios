@@ -64,6 +64,7 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     private let client = SubclipAPIClient()
     private var pollTask: Task<Void, Never>?
+    private var importedVideoURL: URL?
 
     init() {
         self.apiKey = KeychainStore.readAPIKey()
@@ -86,6 +87,17 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     var selectedTemplate: CaptionTemplate {
         CaptionTemplate.all.first(where: { $0.id == selectedTemplateId }) ?? CaptionTemplate.all[0]
+    }
+
+    var faceTrackApplies: Bool {
+        guard let sourceAspectRatio = selectedVideo?.metadata.inferredAspectRatio else {
+            return true
+        }
+        return sourceAspectRatio != aspectRatio
+    }
+
+    var effectiveFaceTrack: Bool {
+        faceTrack && faceTrackApplies
     }
 
     func saveAPIKey() {
@@ -155,21 +167,35 @@ final class ViralCaptionsViewModel: ObservableObject {
         statusMessage = "Reading video metadata..."
 
         let didStartScope = url.startAccessingSecurityScopedResource()
+        var scopeActive = didStartScope
+        var copiedURL: URL?
         do {
-            let metadata = try await MediaMetadataReader.videoMetadata(for: url)
+            let originalFileName = sanitizedFileName(url.lastPathComponent, fallback: "video.mp4")
+            let localURL = try copyVideoIntoImports(from: url, fallbackFileName: originalFileName)
+            copiedURL = localURL
+            if scopeActive {
+                url.stopAccessingSecurityScopedResource()
+                scopeActive = false
+            }
+
+            let metadata = try await MediaMetadataReader.videoMetadata(for: localURL)
+            importedVideoURL = localURL
             selectedVideo = SelectedVideo(
-                url: url,
-                fileName: sanitizedFileName(url.lastPathComponent, fallback: "video.mp4"),
-                securityScoped: didStartScope,
+                url: localURL,
+                fileName: originalFileName,
+                securityScoped: false,
                 metadata: metadata
             )
-            outputFileName = defaultOutputName(for: url.lastPathComponent)
+            outputFileName = defaultOutputName(for: originalFileName)
             phase = .idle
             statusMessage = "Ready to render."
             progress = 0
         } catch {
-            if didStartScope {
+            if scopeActive {
                 url.stopAccessingSecurityScopedResource()
+            }
+            if let copiedURL {
+                try? FileManager.default.removeItem(at: copiedURL)
             }
             selectedVideo = nil
             phase = .failed
@@ -213,6 +239,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             phase = .creatingUpload
             progress = 0.08
             statusMessage = "Creating secure upload URLs..."
+            let shouldDeclareDimensions = selectedVideo.metadata.inferredAspectRatio != aspectRatio
 
             let uploadPayload = CreateUploadRequest(
                 projectName: selectedVideo.fileName.replacingOccurrences(of: ".\(selectedVideo.url.pathExtension)", with: ""),
@@ -221,8 +248,8 @@ final class ViralCaptionsViewModel: ObservableObject {
                     contentType: selectedVideo.metadata.contentType,
                     fileSize: selectedVideo.metadata.fileSize,
                     durationSeconds: selectedVideo.metadata.durationSeconds,
-                    width: selectedVideo.metadata.width,
-                    height: selectedVideo.metadata.height
+                    width: shouldDeclareDimensions ? selectedVideo.metadata.width : nil,
+                    height: shouldDeclareDimensions ? selectedVideo.metadata.height : nil
                 ),
                 srt: selectedSRT.map {
                     .init(fileName: $0.fileName, contentType: "text/plain", fileSize: $0.fileSize)
@@ -265,7 +292,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                     templateId: selectedTemplateId,
                     aspectRatio: aspectRatio.rawValue,
                     placement: placement.rawValue,
-                    faceTrack: faceTrack,
+                    faceTrack: effectiveFaceTrack ? true : nil,
                     outputFileName: normalizedOutputFileName()
                 )
             )
@@ -296,6 +323,46 @@ final class ViralCaptionsViewModel: ObservableObject {
             phase = .failed
             statusMessage = "Render failed."
             alert = AppMessage(title: "Render failed", message: error.localizedDescription)
+        }
+    }
+
+    func saveOutputCopy(to destination: URL) {
+        guard let outputURL else { return }
+        do {
+            var destinationURL = destination
+            if destinationURL.pathExtension.isEmpty {
+                destinationURL.appendPathExtension("mp4")
+            }
+            if outputURL.standardizedFileURL == destinationURL.standardizedFileURL {
+                alert = AppMessage(title: "MP4 saved", message: destinationURL.path)
+                return
+            }
+            let fileManager = FileManager.default
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: outputURL, to: destinationURL)
+            alert = AppMessage(title: "MP4 saved", message: destinationURL.path)
+        } catch {
+            alert = AppMessage(title: "Could not save MP4", message: error.localizedDescription)
+        }
+    }
+
+    func saveOutputToDefaultFolder() {
+        guard let outputURL else { return }
+        let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        let destination = base
+            .appendingPathComponent("Viral Captions", isDirectory: true)
+            .appendingPathComponent(outputURL.lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            saveOutputCopy(to: destination)
+        } catch {
+            alert = AppMessage(title: "Could not save MP4", message: error.localizedDescription)
         }
     }
 
@@ -345,7 +412,31 @@ final class ViralCaptionsViewModel: ObservableObject {
         if selectedVideo?.securityScoped == true {
             selectedVideo?.url.stopAccessingSecurityScopedResource()
         }
+        if let importedVideoURL {
+            try? FileManager.default.removeItem(at: importedVideoURL)
+            self.importedVideoURL = nil
+        }
         selectedVideo = nil
+    }
+
+    private func copyVideoIntoImports(from sourceURL: URL, fallbackFileName: String) throws -> URL {
+        let importsDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ViralCaptionsImports", isDirectory: true)
+        try FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
+
+        let fallbackExtension = URL(fileURLWithPath: fallbackFileName).pathExtension
+        let fileExtension = sourceURL.pathExtension.isEmpty
+            ? (fallbackExtension.isEmpty ? "mp4" : fallbackExtension)
+            : sourceURL.pathExtension
+        let destination = importsDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension(fileExtension)
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+        return destination
     }
 
 }

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import UniformTypeIdentifiers
 
 struct LanguageOption: Identifiable, Hashable {
@@ -188,6 +189,28 @@ enum OutputAspectRatio: String, CaseIterable, Identifiable {
     case square = "1:1"
 
     var id: String { rawValue }
+
+    var previewAspect: CGFloat {
+        switch self {
+        case .vertical:
+            return 9.0 / 16.0
+        case .landscape:
+            return 16.0 / 9.0
+        case .square:
+            return 1
+        }
+    }
+
+    var previewMaxWidth: CGFloat? {
+        switch self {
+        case .vertical:
+            return 280
+        case .landscape:
+            return nil
+        case .square:
+            return 420
+        }
+    }
 }
 
 enum CaptionPlacement: String, CaseIterable, Identifiable {
@@ -223,6 +246,14 @@ struct VideoMetadata: Equatable {
     var dimensionsLabel: String {
         guard width > 0, height > 0 else { return "Unknown size" }
         return "\(width)x\(height)"
+    }
+
+    var inferredAspectRatio: OutputAspectRatio? {
+        guard width > 0, height > 0 else { return nil }
+        let ratio = Double(width) / Double(height)
+        if ratio > 1.2 { return .landscape }
+        if ratio < 0.8 { return .vertical }
+        return .square
     }
 }
 

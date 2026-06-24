@@ -6,14 +6,12 @@
 //
 
 import SwiftUI
-import SwiftData
 
 @main
 struct Viral_CaptionsApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                .modelContainer(for: Item.self)
         }
         #if os(macOS)
         .windowToolbarStyle(.unified)
