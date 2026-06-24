@@ -112,14 +112,27 @@ struct ContentView: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
+            .tint(Brand.navy)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
-                    Button(action: pickVideo) {
-                        Label("Choose video", systemImage: "plus")
-                    }
+                    if #available(iOS 26.0, macOS 26.0, *) {
+                        Button(action: pickVideo) {
+                            Label("Choose video", systemImage: "plus")
+                        }
+                        .buttonStyle(.glass)
 
-                    Button(action: pickSRT) {
-                        Label("SRT", systemImage: "text.badge.plus")
+                        Button(action: pickSRT) {
+                            Label("SRT", systemImage: "text.badge.plus")
+                        }
+                        .buttonStyle(.glass)
+                    } else {
+                        Button(action: pickVideo) {
+                            Label("Choose video", systemImage: "plus")
+                        }
+
+                        Button(action: pickSRT) {
+                            Label("SRT", systemImage: "text.badge.plus")
+                        }
                     }
                 }
             }
@@ -270,12 +283,15 @@ private struct HeaderView: View {
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background {
-                            Capsule()
-                                .fill(Brand.surface)
-                                .overlay {
-                                    Capsule().stroke(Brand.cyan, lineWidth: 1)
-                                }
-                        }
+                        LiquidGlassCapsuleSurface(
+                            fill: Brand.surface,
+                            tint: Brand.cyan,
+                            fillOpacity: 0.9,
+                            strokeOpacity: 0.9,
+                            shadowOpacity: 0
+                        )
+                    }
+                    .liquidGlassCapsule(tint: Brand.cyan)
                 }
                 Text("Viral Captions")
                     .font(.system(size: 30, weight: .bold, design: .rounded))
@@ -305,23 +321,25 @@ private struct APIKeyCard: View {
                     .autocorrectionDisabled()
                     #endif
 
-                HStack(spacing: 10) {
-                    Button {
-                        viewModel.saveAPIKey()
-                    } label: {
-                        Label("Save key", systemImage: "checkmark.seal.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
+                LiquidGlassGroup(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button {
+                            viewModel.saveAPIKey()
+                        } label: {
+                            Label("Save key", systemImage: "checkmark.seal.fill")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
 
-                    Button {
-                        viewModel.clearAPIKey()
-                    } label: {
-                        Image(systemName: "trash")
-                            .frame(width: 34, height: 34)
+                        Button {
+                            viewModel.clearAPIKey()
+                        } label: {
+                            Image(systemName: "trash")
+                                .frame(width: 34, height: 34)
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
+                        .accessibilityLabel("Remove saved API key")
                     }
-                    .buttonStyle(SecondaryButtonStyle())
-                    .accessibilityLabel("Remove saved API key")
                 }
 
                 HStack(spacing: 8) {
@@ -361,17 +379,19 @@ private struct MediaCard: View {
                     }
                 }
 
-                HStack(spacing: 10) {
-                    Button(action: onPickVideo) {
-                        Label(viewModel.selectedVideo == nil ? "Choose video" : "Replace video", systemImage: "plus")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
+                LiquidGlassGroup(spacing: 10) {
+                    HStack(spacing: 10) {
+                        Button(action: onPickVideo) {
+                            Label(viewModel.selectedVideo == nil ? "Choose video" : "Replace video", systemImage: "plus")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
 
-                    Button(action: onPickSRT) {
-                        Label("SRT", systemImage: "text.badge.plus")
+                        Button(action: onPickSRT) {
+                            Label("SRT", systemImage: "text.badge.plus")
+                        }
+                        .buttonStyle(SecondaryButtonStyle())
                     }
-                    .buttonStyle(SecondaryButtonStyle())
                 }
 
                 if let srt = viewModel.selectedSRT {
@@ -398,6 +418,7 @@ private struct MediaCard: View {
                     .background {
                         LiquidGlassSurface(cornerRadius: 8, tint: Brand.navy)
                     }
+                    .liquidGlass(cornerRadius: 8, tint: Brand.navy)
                 }
             }
         }
@@ -413,13 +434,15 @@ private struct TemplateCard: View {
                 CardHeader(title: "Style", systemImage: "sparkles")
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(CaptionTemplate.all) { template in
-                            TemplateButton(
-                                template: template,
-                                selected: template.id == viewModel.selectedTemplateId
-                            ) {
-                                viewModel.selectedTemplateId = template.id
+                    LiquidGlassGroup(spacing: 10) {
+                        HStack(spacing: 10) {
+                            ForEach(CaptionTemplate.all) { template in
+                                TemplateButton(
+                                    template: template,
+                                    selected: template.id == viewModel.selectedTemplateId
+                                ) {
+                                    viewModel.selectedTemplateId = template.id
+                                }
                             }
                         }
                     }
@@ -449,13 +472,17 @@ private struct TemplateButton: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
                         .background {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(selected ? Brand.navy : Brand.surface)
-                                .overlay {
-                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                        .stroke(selected ? Brand.navy : Brand.line, lineWidth: 1)
-                                }
+                            LiquidGlassSurface(
+                                cornerRadius: 6,
+                                fill: selected ? Brand.navy : Brand.surface,
+                                tint: selected ? Brand.cyan : Brand.line,
+                                fillOpacity: selected ? 0.95 : 0.9,
+                                strokeOpacity: selected ? 0.4 : 0.8,
+                                shadowOpacity: 0,
+                                interactive: false
+                            )
                         }
+                        .liquidGlass(cornerRadius: 6, tint: selected ? Brand.cyan : Brand.line)
                         .padding(8)
                 }
                 .frame(width: 150, height: 224)
@@ -480,13 +507,17 @@ private struct TemplateButton: View {
             .frame(width: 150, alignment: .leading)
             .padding(10)
             .background {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Brand.surface)
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(selected ? Brand.cyan : Brand.line, lineWidth: selected ? 1.5 : 1)
-                }
+                LiquidGlassSurface(
+                    cornerRadius: 8,
+                    fill: Brand.surface,
+                    tint: selected ? Brand.cyan : Brand.line,
+                    fillOpacity: 0.92,
+                    strokeOpacity: selected ? 0.9 : 0.72,
+                    shadowOpacity: selected ? 0.04 : 0.015,
+                    interactive: true
+                )
             }
+            .liquidGlass(cornerRadius: 8, tint: selected ? Brand.cyan : Brand.line, interactive: true)
         }
         .buttonStyle(.plain)
     }
@@ -685,18 +716,20 @@ private struct AspectRatioControl: View {
     @Binding var selection: OutputAspectRatio
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(OutputAspectRatio.allCases) { ratio in
-                OptionChip(
-                    title: ratio.rawValue,
-                    systemImage: aspectIcon(for: ratio),
-                    selected: ratio == selection
-                ) {
-                    selection = ratio
+        LiquidGlassGroup(spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(OutputAspectRatio.allCases) { ratio in
+                    OptionChip(
+                        title: ratio.rawValue,
+                        systemImage: aspectIcon(for: ratio),
+                        selected: ratio == selection
+                    ) {
+                        selection = ratio
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func aspectIcon(for ratio: OutputAspectRatio) -> String {
@@ -715,18 +748,20 @@ private struct PlacementControl: View {
     @Binding var selection: CaptionPlacement
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(CaptionPlacement.allCases) { placement in
-                OptionChip(
-                    title: placement.label,
-                    systemImage: icon(for: placement),
-                    selected: placement == selection
-                ) {
-                    selection = placement
+        LiquidGlassGroup(spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(CaptionPlacement.allCases) { placement in
+                    OptionChip(
+                        title: placement.label,
+                        systemImage: icon(for: placement),
+                        selected: placement == selection
+                    ) {
+                        selection = placement
+                    }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func icon(for placement: CaptionPlacement) -> String {
@@ -758,13 +793,17 @@ private struct OptionChip: View {
                 .padding(.vertical, 10)
                 .padding(.horizontal, 10)
                 .background {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(selected ? Brand.navy : Brand.surface)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(selected ? Brand.navy : Brand.line, lineWidth: 1)
-                        }
+                    LiquidGlassSurface(
+                        cornerRadius: 8,
+                        fill: selected ? Brand.navy : Brand.surface,
+                        tint: selected ? Brand.cyan : Brand.line,
+                        fillOpacity: selected ? 0.95 : 0.9,
+                        strokeOpacity: selected ? 0.42 : 0.72,
+                        shadowOpacity: selected ? 0.035 : 0.01,
+                        interactive: true
+                    )
                 }
+                .liquidGlass(cornerRadius: 8, tint: selected ? Brand.cyan : Brand.line, interactive: true)
         }
         .buttonStyle(.plain)
         .frame(minWidth: 86, maxWidth: 132)
@@ -831,22 +870,43 @@ private struct RenderCard: View {
             VStack(alignment: .leading, spacing: 16) {
                 CardHeader(title: "Render", systemImage: "bolt.fill")
 
-                Button {
-                    viewModel.render()
-                } label: {
-                    HStack(spacing: 10) {
-                        if viewModel.isRendering {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(.white)
-                        } else {
-                            Image(systemName: "wand.and.stars")
+                if #available(iOS 26.0, macOS 26.0, *) {
+                    Button {
+                        viewModel.render()
+                    } label: {
+                        HStack(spacing: 10) {
+                            if viewModel.isRendering {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "wand.and.stars")
+                            }
+                            Text(viewModel.isRendering ? viewModel.phase.label : "Render video")
                         }
-                        Text(viewModel.isRendering ? viewModel.phase.label : "Render video")
+                        .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.glassProminent)
+                    .tint(Brand.navy)
+                    .disabled(!viewModel.canRender)
+                } else {
+                    Button {
+                        viewModel.render()
+                    } label: {
+                        HStack(spacing: 10) {
+                            if viewModel.isRendering {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.white)
+                            } else {
+                                Image(systemName: "wand.and.stars")
+                            }
+                            Text(viewModel.isRendering ? viewModel.phase.label : "Render video")
+                        }
+                    }
+                    .buttonStyle(PrimaryButtonStyle(isDisabled: !viewModel.canRender))
+                    .disabled(!viewModel.canRender)
                 }
-                .buttonStyle(PrimaryButtonStyle(isDisabled: !viewModel.canRender))
-                .disabled(!viewModel.canRender)
 
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
@@ -871,6 +931,7 @@ private struct RenderCard: View {
                 .background {
                     LiquidGlassSurface(cornerRadius: 8, tint: Brand.navy)
                 }
+                .liquidGlass(cornerRadius: 8, tint: Brand.navy)
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10)], spacing: 10) {
                     if let projectId = viewModel.projectId {
@@ -976,13 +1037,22 @@ private struct CardHeader: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Brand.navy.opacity(0.1))
-                Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(Brand.navy)
-            }
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(Brand.navy)
+                .frame(width: 30, height: 30)
+                .background {
+                    LiquidGlassSurface(
+                        cornerRadius: 7,
+                        fill: Brand.surface,
+                        tint: Brand.navy,
+                        fillOpacity: 0.86,
+                        strokeOpacity: 0.12,
+                        shadowOpacity: 0,
+                        interactive: false
+                    )
+                }
+                .liquidGlass(cornerRadius: 7, tint: Brand.navy)
             .frame(width: 30, height: 30)
 
             Text(title)
@@ -1026,12 +1096,16 @@ private struct MetricPill: View {
             .padding(.horizontal, 9)
             .padding(.vertical, 6)
             .background {
-                Capsule()
-                    .fill(Brand.surface)
-                    .overlay {
-                        Capsule().stroke(Brand.line, lineWidth: 1)
-                    }
+                LiquidGlassCapsuleSurface(
+                    fill: Brand.surface,
+                    tint: Brand.line,
+                    fillOpacity: 0.9,
+                    strokeOpacity: 0.74,
+                    shadowOpacity: 0,
+                    interactive: false
+                )
             }
+            .liquidGlassCapsule(tint: Brand.line)
     }
 }
 
@@ -1056,6 +1130,7 @@ private struct MiniStat: View {
         .background {
             LiquidGlassSurface(cornerRadius: 8, tint: Brand.navy)
         }
+        .liquidGlass(cornerRadius: 8, tint: Brand.navy)
     }
 }
 
