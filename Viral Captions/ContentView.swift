@@ -67,18 +67,12 @@ struct ContentView: View {
 
     private var appContent: some View {
         TabView(selection: $selectedTab) {
-            NavigationStack {
-                CreateWorkspace(
-                    viewModel: viewModel,
-                    onPickVideo: pickVideo,
-                    onPickSRT: pickSRT,
-                    onSaveOutput: saveOutput
-                )
-                .navigationTitle("Create")
-                #if os(iOS)
-                .navigationBarTitleDisplayMode(.inline)
-                #endif
-            }
+            CreateWorkspace(
+                viewModel: viewModel,
+                onPickVideo: pickVideo,
+                onPickSRT: pickSRT,
+                onSaveOutput: saveOutput
+            )
             .tabItem {
                 Label("Create", systemImage: "wand.and.stars")
             }
@@ -243,11 +237,13 @@ struct ContentView: View {
     #if os(iOS)
     private func importPickedVideo(_ item: PhotosPickerItem?) {
         guard let item else { return }
+        viewModel.beginVideoImport()
         Task {
             do {
                 guard let movie = try await item.loadTransferable(type: PickedVideo.self) else {
                     await MainActor.run {
-                        viewModel.alert = AppMessage(title: "Video import failed", message: "Could not read the selected video.")
+                        selectedVideoItem = nil
+                        viewModel.failVideoImport(message: "Could not read the selected video.")
                     }
                     return
                 }
@@ -259,7 +255,7 @@ struct ContentView: View {
             } catch {
                 await MainActor.run {
                     selectedVideoItem = nil
-                    viewModel.alert = AppMessage(title: "Video import failed", message: error.localizedDescription)
+                    viewModel.failVideoImport(message: error.localizedDescription)
                 }
             }
         }
@@ -345,14 +341,13 @@ private struct CreateWorkspace: View {
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
-                VStack(spacing: 20) {
+                LazyVStack(spacing: 20) {
                     if proxy.size.width >= 940 {
                         HStack(alignment: .top, spacing: 18) {
                             VStack(spacing: 18) {
                                 MediaCard(
                                     viewModel: viewModel,
-                                    onPickVideo: onPickVideo,
-                                    onPickSRT: onPickSRT
+                                    onPickVideo: onPickVideo
                                 )
                                 TemplateCard(viewModel: viewModel)
                             }
@@ -360,7 +355,7 @@ private struct CreateWorkspace: View {
 
                             VStack(spacing: 18) {
                                 if viewModel.selectedVideo != nil {
-                                    CoreRenderOptionsCard(viewModel: viewModel)
+                                    CoreRenderOptionsCard(viewModel: viewModel, onPickSRT: onPickSRT)
                                     RenderCard(viewModel: viewModel)
                                 }
                                 if viewModel.outputURL != nil {
@@ -373,12 +368,11 @@ private struct CreateWorkspace: View {
                         VStack(spacing: 18) {
                             MediaCard(
                                 viewModel: viewModel,
-                                onPickVideo: onPickVideo,
-                                onPickSRT: onPickSRT
+                                onPickVideo: onPickVideo
                             )
                             TemplateCard(viewModel: viewModel)
                             if viewModel.selectedVideo != nil {
-                                CoreRenderOptionsCard(viewModel: viewModel)
+                                CoreRenderOptionsCard(viewModel: viewModel, onPickSRT: onPickSRT)
                                 RenderCard(viewModel: viewModel)
                             }
                             if viewModel.outputURL != nil {
@@ -404,7 +398,7 @@ private struct SettingsWorkspace: View {
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
-                VStack(spacing: 20) {
+                LazyVStack(spacing: 20) {
                     if proxy.size.width >= 940 {
                         HStack(alignment: .top, spacing: 18) {
                             VStack(spacing: 18) {
@@ -414,7 +408,6 @@ private struct SettingsWorkspace: View {
                             .frame(maxWidth: 520)
 
                             VStack(spacing: 18) {
-                                AdvancedSettingsCard(viewModel: viewModel)
                                 LocalQueueCard(viewModel: viewModel)
                             }
                             .frame(maxWidth: .infinity)
@@ -423,7 +416,6 @@ private struct SettingsWorkspace: View {
                         VStack(spacing: 18) {
                             APIKeyCard(viewModel: viewModel)
                             ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
-                            AdvancedSettingsCard(viewModel: viewModel)
                             LocalQueueCard(viewModel: viewModel)
                         }
                     }
@@ -441,45 +433,6 @@ private struct SettingsWorkspace: View {
 private struct AppBackground: View {
     var body: some View {
         Brand.softSurface.ignoresSafeArea()
-    }
-}
-
-private struct HeaderView: View {
-    var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Brand.navy)
-                Image(systemName: "captions.bubble.fill")
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundStyle(.white)
-            }
-            .frame(width: 54, height: 54)
-
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 8) {
-                    Text("SUBCLIP")
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .tracking(1.4)
-                        .foregroundStyle(Brand.navy)
-                    Text("API")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(Brand.cyan)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .nativeGlassCapsule()
-                }
-                Text("Viral Captions")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(Brand.ink)
-                    .minimumScaleFactor(0.8)
-                Text("Upload, render, preview, and share captioned MP4s.")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Brand.slate)
-            }
-
-            Spacer(minLength: 0)
-        }
     }
 }
 
@@ -559,70 +512,49 @@ private struct APIKeyCard: View {
 private struct MediaCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onPickVideo: () -> Void
-    var onPickSRT: () -> Void
 
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 16) {
                 CardHeader(title: "Media", systemImage: "film.fill")
 
-                ZStack {
-                    VideoPreview(url: viewModel.selectedVideo?.url)
-                    if viewModel.isImportingVideo {
-                        VideoImportOverlay()
-                    }
-                }
-                .frame(height: viewModel.selectedVideo == nil ? 180 : 260)
-
                 if let video = viewModel.selectedVideo {
-                    VStack(spacing: 8) {
-                        MetricRow(title: video.fileName, value: video.metadata.durationLabel, icon: "clock")
-                        HStack(spacing: 8) {
-                            MetricPill(text: video.metadata.sizeLabel, systemImage: "externaldrive")
-                            MetricPill(text: video.metadata.dimensionsLabel, systemImage: "rectangle.inset.filled")
-                            MetricPill(text: video.metadata.contentType, systemImage: "doc")
+                    ZStack {
+                        SelectedVideoSummary(video: video)
+                        if viewModel.isImportingVideo {
+                            VideoImportOverlay(progress: viewModel.videoImportProgress)
                         }
                     }
                 }
 
                 LiquidGlassGroup(spacing: 10) {
-                    HStack(spacing: 10) {
-                        Button(action: onPickVideo) {
-                            Label(videoButtonTitle, systemImage: "plus")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .nativeGlassButton()
-                        .disabled(viewModel.isImportingVideo)
-
-                        Button(action: onPickSRT) {
-                            Label("SRT", systemImage: "text.badge.plus")
-                        }
-                        .nativeGlassButton()
-                    }
-                }
-
-                if let srt = viewModel.selectedSRT {
-                    HStack(spacing: 10) {
-                        Image(systemName: "doc.text.fill")
-                            .foregroundStyle(Brand.navy)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(srt.fileName)
-                                .font(.system(size: 13, weight: .semibold))
-                                .lineLimit(1)
-                            Text(srt.sizeLabel)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Brand.muted)
-                        }
-                        Spacer(minLength: 0)
+                    VStack(spacing: 10) {
                         Button {
-                            viewModel.removeSRT()
+                            guard !viewModel.isImportingVideo else { return }
+                            onPickVideo()
                         } label: {
-                            Image(systemName: "xmark")
+                            VideoPickerButtonLabel(
+                                title: videoButtonTitle,
+                                isLoading: viewModel.isImportingVideo,
+                                progress: viewModel.videoImportProgress
+                            )
                         }
-                        .buttonStyle(.borderless)
+                        .nativeGlassButton(prominent: viewModel.selectedVideo == nil && !viewModel.isImportingVideo)
+
+                        if viewModel.selectedVideo != nil {
+                            Button {
+                                viewModel.render()
+                            } label: {
+                                Label(viewModel.isRendering ? viewModel.phase.label : "Add Captions", systemImage: "wand.and.stars")
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Brand.ink)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                            }
+                            .nativeGlassButton()
+                            .disabled(!viewModel.canRender)
+                        }
                     }
-                    .padding(10)
-                    .nativeGlassPanel(cornerRadius: 8)
                 }
             }
         }
@@ -634,7 +566,68 @@ private struct MediaCard: View {
     }
 }
 
+private struct VideoPickerButtonLabel: View {
+    let title: String
+    let isLoading: Bool
+    let progress: Double
+
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 10) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "plus")
+                }
+
+                Text(title)
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                    .foregroundStyle(Brand.ink)
+            }
+            .frame(maxWidth: .infinity)
+
+            if isLoading {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 220)
+            }
+        }
+        .padding(.vertical, 12)
+    }
+}
+
+private struct SelectedVideoSummary: View {
+    let video: SelectedVideo
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VideoPreview(url: video.url)
+                .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                .frame(width: 58)
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Video selected")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(Brand.ink)
+                Text("Ready to add captions.")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Brand.slate)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(Brand.navy)
+        }
+        .padding(10)
+        .nativeGlassPanel(cornerRadius: 8)
+    }
+}
+
 private struct VideoImportOverlay: View {
+    let progress: Double
+
     var body: some View {
         VStack(spacing: 12) {
             ProgressView()
@@ -642,7 +635,7 @@ private struct VideoImportOverlay: View {
             Text("Loading video")
                 .font(.system(size: 14, weight: .bold))
                 .foregroundStyle(Brand.ink)
-            ProgressView(value: 0.62)
+            ProgressView(value: progress)
                 .progressViewStyle(.linear)
                 .frame(maxWidth: 180)
         }
@@ -657,7 +650,7 @@ private struct TemplateCard: View {
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 14) {
-                CardHeader(title: "Style", systemImage: "sparkles")
+                CardHeader(title: "Choose Style", systemImage: "sparkles")
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     LiquidGlassGroup(spacing: 10) {
@@ -1056,62 +1049,152 @@ private struct OptionChip: View {
 
 private struct CoreRenderOptionsCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    var onPickSRT: () -> Void
+    @State private var isExpanded = false
 
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 16) {
-                CardHeader(title: "Render Settings", systemImage: "slider.horizontal.3")
+                HStack(spacing: 10) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(Brand.navy)
+                        .frame(width: 30, height: 30)
+                        .nativeGlassPanel(cornerRadius: 7)
 
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Language")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Brand.slate)
-                    LanguageMenu(selection: $viewModel.selectedLanguage)
-                }
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Aspect Ratio")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Brand.slate)
-                    AspectRatioControl(selection: $viewModel.aspectRatio)
-                }
-
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Placement")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Brand.slate)
-                    PlacementControl(selection: $viewModel.placement)
-                }
-
-                Toggle(
-                    isOn: Binding(
-                        get: { viewModel.faceTrackApplies && viewModel.faceTrack },
-                        set: { viewModel.faceTrack = $0 }
-                    )
-                ) {
-                    Label("Face tracking", systemImage: "face.smiling")
-                        .font(.system(size: 14, weight: .semibold))
+                    Text("Render Settings")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
                         .foregroundStyle(Brand.ink)
+                    Spacer(minLength: 0)
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            isExpanded.toggle()
+                        }
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .frame(width: 34, height: 34)
+                    }
+                    .nativeGlassButton()
+                    .accessibilityLabel(isExpanded ? "Collapse render settings" : "Expand render settings")
                 }
-                .disabled(!viewModel.faceTrackApplies)
-                .opacity(viewModel.faceTrackApplies ? 1 : 0.55)
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+                    MetricPill(text: languageSummary, systemImage: "textformat")
+                    MetricPill(text: viewModel.aspectRatio.rawValue, systemImage: aspectIcon)
+                    MetricPill(text: viewModel.placement.label, systemImage: placementIcon)
+                }
+
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Language")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Brand.slate)
+                            LanguageMenu(selection: $viewModel.selectedLanguage)
+                        }
+
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Aspect Ratio")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Brand.slate)
+                            AspectRatioControl(selection: $viewModel.aspectRatio)
+                        }
+
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Placement")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Brand.slate)
+                            PlacementControl(selection: $viewModel.placement)
+                        }
+
+                        Toggle(
+                            isOn: Binding(
+                                get: { viewModel.faceTrackApplies && viewModel.faceTrack },
+                                set: { viewModel.faceTrack = $0 }
+                            )
+                        ) {
+                            Label("Face tracking", systemImage: "face.smiling")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(Brand.ink)
+                        }
+                        .disabled(!viewModel.faceTrackApplies)
+                        .opacity(viewModel.faceTrackApplies ? 1 : 0.55)
+
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Advanced")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(Brand.slate)
+                            SRTAttachmentControl(viewModel: viewModel, onPickSRT: onPickSRT)
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
+        }
+    }
+
+    private var languageSummary: String {
+        let option = LanguageOption.all.first(where: { $0.id == viewModel.selectedLanguage }) ?? LanguageOption.all[0]
+        return option.id == "auto" ? "Auto" : option.name
+    }
+
+    private var aspectIcon: String {
+        switch viewModel.aspectRatio {
+        case .vertical:
+            return "rectangle.portrait"
+        case .landscape:
+            return "rectangle"
+        case .square:
+            return "square"
+        }
+    }
+
+    private var placementIcon: String {
+        switch viewModel.placement {
+        case .top:
+            return "align.vertical.top.fill"
+        case .middle:
+            return "align.vertical.center.fill"
+        case .bottom:
+            return "align.vertical.bottom.fill"
         }
     }
 }
 
-private struct AdvancedSettingsCard: View {
+private struct SRTAttachmentControl: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    var onPickSRT: () -> Void
 
     var body: some View {
-        BrandCard {
-            VStack(alignment: .leading, spacing: 16) {
-                CardHeader(title: "Defaults", systemImage: "slider.horizontal.below.rectangle")
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: onPickSRT) {
+                Label(viewModel.selectedSRT == nil ? "Attach SRT" : "Replace SRT", systemImage: "text.badge.plus")
+                    .frame(maxWidth: .infinity)
+            }
+            .nativeGlassButton()
 
-                Label("Rendered videos are saved as Captioned-[source name].mp4.", systemImage: "doc.badge.gearshape")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Brand.slate)
-                    .fixedSize(horizontal: false, vertical: true)
+            if let srt = viewModel.selectedSRT {
+                HStack(spacing: 10) {
+                    Image(systemName: "doc.text.fill")
+                        .foregroundStyle(Brand.navy)
+                    Text(srt.fileName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Brand.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: 0)
+                    Button {
+                        viewModel.removeSRT()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .frame(width: 30, height: 30)
+                    }
+                    .nativeGlassButton()
+                    .accessibilityLabel("Remove SRT")
+                }
+                .padding(10)
+                .nativeGlassPanel(cornerRadius: 8)
             }
         }
     }
@@ -1227,7 +1310,7 @@ private struct RenderCard: View {
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 16) {
-                CardHeader(title: "Render", systemImage: "bolt.fill")
+                CardHeader(title: "Add Captions", systemImage: "bolt.fill")
 
                 Button {
                     viewModel.render()
@@ -1239,7 +1322,7 @@ private struct RenderCard: View {
                         } else {
                             Image(systemName: "wand.and.stars")
                         }
-                        Text(viewModel.isRendering ? viewModel.phase.label : "Render video")
+                        Text(viewModel.isRendering ? viewModel.phase.label : "Add Captions")
                     }
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(Brand.navy.opacity(renderLabelOpacity))

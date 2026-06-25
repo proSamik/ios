@@ -45,6 +45,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var selectedVideo: SelectedVideo?
     @Published var selectedSRT: SelectedSRT?
     @Published var isImportingVideo = false
+    @Published var videoImportProgress: Double = 0
     @Published var selectedTemplateId = "bold-clean"
     @Published var selectedLanguage = "auto"
     @Published var aspectRatio: OutputAspectRatio = .vertical
@@ -152,7 +153,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         runId = nil
         progress = 0
         phase = .idle
-        statusMessage = selectedVideo == nil ? "Choose a video to begin." : "Ready to render."
+        statusMessage = selectedVideo == nil ? "Choose a video to begin." : "Ready to add captions."
     }
 
     func render() {
@@ -163,6 +164,22 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
     }
 
+    func beginVideoImport() {
+        resetResult()
+        isImportingVideo = true
+        videoImportProgress = 0.12
+        phase = .readingMedia
+        statusMessage = "Loading video..."
+    }
+
+    func failVideoImport(message: String) {
+        isImportingVideo = false
+        videoImportProgress = 0
+        phase = .failed
+        statusMessage = "Could not read that video."
+        alert = AppMessage(title: "Video import failed", message: message)
+    }
+
     func clearUploadQueue() {
         uploadQueue.removeAll()
         LocalUploadQueueStore.save(uploadQueue)
@@ -170,24 +187,25 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     private func setVideo(from url: URL) async {
         releaseVideoScope()
-        resetResult()
-        isImportingVideo = true
-        phase = .readingMedia
-        statusMessage = "Reading video metadata..."
+        beginVideoImport()
 
         let didStartScope = url.startAccessingSecurityScopedResource()
         var scopeActive = didStartScope
         var copiedURL: URL?
         do {
-            let originalFileName = sanitizedFileName(url.lastPathComponent, fallback: "video.mp4")
-            let localURL = try copyVideoIntoImports(from: url, fallbackFileName: originalFileName)
+            let originalFileName = friendlyVideoFileName(for: url)
+            let localURL = try await Task.detached(priority: .userInitiated) {
+                try Self.copyVideoIntoImports(from: url, fallbackFileName: originalFileName)
+            }.value
             copiedURL = localURL
+            videoImportProgress = 0.45
             if scopeActive {
                 url.stopAccessingSecurityScopedResource()
                 scopeActive = false
             }
 
             let metadata = try await MediaMetadataReader.videoMetadata(for: localURL)
+            videoImportProgress = 0.82
             importedVideoURL = localURL
             selectedVideo = SelectedVideo(
                 url: localURL,
@@ -197,8 +215,9 @@ final class ViralCaptionsViewModel: ObservableObject {
             )
             outputFileName = defaultOutputName(for: originalFileName)
             phase = .idle
-            statusMessage = "Ready to render."
+            statusMessage = "Ready to add captions."
             progress = 0
+            videoImportProgress = 1
             isImportingVideo = false
         } catch {
             if scopeActive {
@@ -208,10 +227,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                 try? FileManager.default.removeItem(at: copiedURL)
             }
             selectedVideo = nil
-            phase = .failed
-            statusMessage = "Could not read that video."
-            isImportingVideo = false
-            alert = AppMessage(title: "Video import failed", message: error.localizedDescription)
+            failVideoImport(message: error.localizedDescription)
         }
     }
 
@@ -435,6 +451,23 @@ final class ViralCaptionsViewModel: ObservableObject {
         return "Captioned-\(base).mp4"
     }
 
+    private func friendlyVideoFileName(for url: URL) -> String {
+        let sanitized = sanitizedFileName(url.lastPathComponent, fallback: "video.mp4")
+        let fallbackExtension = url.pathExtension.isEmpty ? "mp4" : url.pathExtension
+        let base = URL(fileURLWithPath: sanitized).deletingPathExtension().lastPathComponent
+        let uuidPattern = #"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"#
+        let isUUIDLike = base.range(of: uuidPattern, options: .regularExpression) != nil
+            || ((base.filter(\.isNumber).count + base.filter(\.isLetter).count) >= 24 && base.contains("-"))
+
+        guard isUUIDLike else {
+            return sanitized
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmm"
+        return "Video-\(formatter.string(from: Date())).\(fallbackExtension)"
+    }
+
     private func normalizedOutputFileName() -> String? {
         let cleaned = sanitizedFileName(outputFileName, fallback: "captioned-video.mp4")
         guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -477,7 +510,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         selectedVideo = nil
     }
 
-    private func copyVideoIntoImports(from sourceURL: URL, fallbackFileName: String) throws -> URL {
+    nonisolated private static func copyVideoIntoImports(from sourceURL: URL, fallbackFileName: String) throws -> URL {
         let importsDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ViralCaptionsImports", isDirectory: true)
         try FileManager.default.createDirectory(at: importsDirectory, withIntermediateDirectories: true)
