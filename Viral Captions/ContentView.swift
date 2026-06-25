@@ -2486,15 +2486,6 @@ private struct ShareDestinationGrid: View {
 
     private func prepareShare() {
         guard !isPreparingShare else { return }
-        if let outputURL = viewModel.outputURL {
-            #if os(iOS)
-            shareItem = ShareSheetItem(url: outputURL, title: viewModel.outputSuggestedFileName ?? outputURL.lastPathComponent)
-            #else
-            viewModel.alert = AppMessage(title: "MP4 ready", message: outputURL.path)
-            #endif
-            return
-        }
-
         isPreparingShare = true
         viewModel.cacheCurrentOutput()
         Task {
