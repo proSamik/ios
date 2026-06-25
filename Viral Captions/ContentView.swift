@@ -731,8 +731,7 @@ private struct VideoImportOverlay: View {
 
 private struct TemplateCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
-    @State private var previewURL: URL?
-    @State private var isShowingPreview = false
+    @State private var previewItem: TemplatePreviewItem?
 
     var body: some View {
         BrandCard {
@@ -750,8 +749,7 @@ private struct TemplateCard: View {
                                 ) {
                                     viewModel.selectedTemplateId = template.id
                                 } onPreview: { url in
-                                    previewURL = url
-                                    isShowingPreview = true
+                                    previewItem = TemplatePreviewItem(url: url)
                                 }
                             }
                         }
@@ -762,24 +760,41 @@ private struct TemplateCard: View {
             }
         }
         #if os(iOS)
-        .fullScreenCover(isPresented: $isShowingPreview, onDismiss: {
-            previewURL = nil
-        }) {
-            if let previewURL {
-                FullScreenVideoPlayer(url: previewURL, isPresented: $isShowingPreview)
-            }
+        .fullScreenCover(item: $previewItem) { item in
+            FullScreenVideoPlayer(
+                url: item.url,
+                isPresented: Binding(
+                    get: { previewItem != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            previewItem = nil
+                        }
+                    }
+                )
+            )
         }
         #else
-        .sheet(isPresented: $isShowingPreview, onDismiss: {
-            previewURL = nil
-        }) {
-            if let previewURL {
-                FullScreenVideoPlayer(url: previewURL, isPresented: $isShowingPreview)
+        .sheet(item: $previewItem) { item in
+            FullScreenVideoPlayer(
+                url: item.url,
+                isPresented: Binding(
+                    get: { previewItem != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            previewItem = nil
+                        }
+                    }
+                )
+            )
                     .frame(minWidth: 720, minHeight: 520)
-            }
         }
         #endif
     }
+}
+
+private struct TemplatePreviewItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 private struct TemplateButton: View {
