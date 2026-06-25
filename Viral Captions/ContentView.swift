@@ -731,7 +731,8 @@ private struct VideoImportOverlay: View {
 
 private struct TemplateCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
-    @State private var previewItem: TemplatePreviewItem?
+    @State private var previewURL: URL?
+    @State private var isShowingPreview = false
 
     var body: some View {
         BrandCard {
@@ -749,7 +750,8 @@ private struct TemplateCard: View {
                                 ) {
                                     viewModel.selectedTemplateId = template.id
                                 } onPreview: { url in
-                                    previewItem = TemplatePreviewItem(url: url)
+                                    previewURL = url
+                                    isShowingPreview = true
                                 }
                             }
                         }
@@ -760,41 +762,24 @@ private struct TemplateCard: View {
             }
         }
         #if os(iOS)
-        .fullScreenCover(item: $previewItem) { item in
-            FullScreenVideoPlayer(
-                url: item.url,
-                isPresented: Binding(
-                    get: { previewItem != nil },
-                    set: { isPresented in
-                        if !isPresented {
-                            previewItem = nil
-                        }
-                    }
-                )
-            )
+        .fullScreenCover(isPresented: $isShowingPreview, onDismiss: {
+            previewURL = nil
+        }) {
+            if let previewURL {
+                FullScreenVideoPlayer(url: previewURL, isPresented: $isShowingPreview)
+            }
         }
         #else
-        .sheet(item: $previewItem) { item in
-            FullScreenVideoPlayer(
-                url: item.url,
-                isPresented: Binding(
-                    get: { previewItem != nil },
-                    set: { isPresented in
-                        if !isPresented {
-                            previewItem = nil
-                        }
-                    }
-                )
-            )
-            .frame(minWidth: 720, minHeight: 520)
+        .sheet(isPresented: $isShowingPreview, onDismiss: {
+            previewURL = nil
+        }) {
+            if let previewURL {
+                FullScreenVideoPlayer(url: previewURL, isPresented: $isShowingPreview)
+                    .frame(minWidth: 720, minHeight: 520)
+            }
         }
         #endif
     }
-}
-
-private struct TemplatePreviewItem: Identifiable {
-    let id = UUID()
-    let url: URL
 }
 
 private struct TemplateButton: View {
@@ -812,19 +797,22 @@ private struct TemplateButton: View {
                 VStack {
                     HStack {
                         Spacer()
-                        Button {
-                            if let url = template.previewVideoURL {
-                                onPreview(url)
-                            }
-                        } label: {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundStyle(Brand.ink)
-                                .frame(width: 30, height: 30)
-                                .nativeGlassPanel(cornerRadius: 15, interactive: true)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("Preview \(template.name) full screen")
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Brand.ink)
+                            .frame(width: 30, height: 30)
+                            .nativeGlassPanel(cornerRadius: 15, interactive: true)
+                            .contentShape(Circle())
+                            .highPriorityGesture(
+                                TapGesture().onEnded {
+                                    if let url = template.previewVideoURL {
+                                        onPreview(url)
+                                    }
+                                }
+                            )
+                            .accessibilityElement()
+                            .accessibilityLabel("Preview \(template.name) full screen")
+                            .accessibilityAddTraits(.isButton)
                     }
                     Spacer()
                 }
@@ -1180,34 +1168,35 @@ private struct OptionChip: View {
     let selectionNamespace: Namespace.ID
     let selectionID: String
     var action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         Button(action: action) {
-            if selected {
+            ZStack {
+                if selected {
+                    Capsule()
+                        .fill(selectedFill)
+                        .matchedGeometryEffect(id: selectionID, in: selectionNamespace)
+                        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 12, x: 0, y: 5)
+                }
+
                 chipLabel
-                    .foregroundStyle(.primary)
-            } else {
-                chipLabel
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(selected ? .primary : .secondary)
             }
         }
         .buttonStyle(.plain)
         .background {
-            if selected {
-                Capsule()
-                    .fill(Brand.surface.opacity(0.55))
-                    .nativeGlassCapsule()
-                    .matchedGeometryEffect(id: selectionID, in: selectionNamespace)
-            }
+            Capsule()
+                .fill(baseFill)
         }
+        .clipShape(Capsule())
         .nativeGlassCapsule(interactive: true)
         .overlay {
-            if selected {
-                Capsule()
-                    .stroke(.primary.opacity(0.24), lineWidth: 1.25)
-            }
+            Capsule()
+                .stroke(selected ? Brand.navy.opacity(0.32) : .white.opacity(colorScheme == .dark ? 0.08 : 0.72), lineWidth: selected ? 1.35 : 1)
         }
         .frame(minWidth: 86, maxWidth: .infinity)
+        .zIndex(selected ? 1 : 0)
     }
 
     private var chipLabel: some View {
@@ -1218,6 +1207,14 @@ private struct OptionChip: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 10)
             .padding(.horizontal, 10)
+    }
+
+    private var baseFill: Color {
+        colorScheme == .dark ? Color.white.opacity(0.10) : Color.white.opacity(0.82)
+    }
+
+    private var selectedFill: Color {
+        colorScheme == .dark ? Color.white.opacity(0.18) : Color.white.opacity(0.96)
     }
 }
 
