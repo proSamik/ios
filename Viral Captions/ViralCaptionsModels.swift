@@ -368,14 +368,14 @@ extension UTType {
     }
 }
 
-func sanitizedFileName(_ value: String, fallback: String) -> String {
+nonisolated func sanitizedFileName(_ value: String, fallback: String) -> String {
     let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._- ")
     let scalars = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "_" }
     let cleaned = String(scalars).trimmingCharacters(in: .whitespacesAndNewlines)
     return cleaned.isEmpty ? fallback : cleaned
 }
 
-func mimeType(for url: URL, fallback: String = "video/mp4") -> String {
+nonisolated func mimeType(for url: URL, fallback: String = "video/mp4") -> String {
     let ext = url.pathExtension.lowercased()
     switch ext {
     case "mov", "qt":

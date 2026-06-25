@@ -196,9 +196,8 @@ struct ContentView: View {
 
     private func downloadHistory(_ item: LocalUploadQueueItem) {
         Task {
-            guard let outputURL = await viewModel.downloadHistoryItem(item) else { return }
+            guard await viewModel.openHistoryItem(item) else { return }
             await MainActor.run {
-                saveURL(outputURL)
                 isShowingResultScreen = true
             }
         }
@@ -469,7 +468,7 @@ private struct SettingsWorkspace: View {
                             .frame(maxWidth: 520)
 
                             VStack(spacing: 18) {
-                                LocalQueueCard(viewModel: viewModel, onDownload: onDownloadHistory)
+                                LocalQueueCard(viewModel: viewModel, onOpen: onDownloadHistory)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -477,7 +476,7 @@ private struct SettingsWorkspace: View {
                         VStack(spacing: 18) {
                             APIKeyCard(viewModel: viewModel)
                             ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
-                            LocalQueueCard(viewModel: viewModel, onDownload: onDownloadHistory)
+                            LocalQueueCard(viewModel: viewModel, onOpen: onDownloadHistory)
                         }
                     }
                 }
@@ -738,6 +737,7 @@ private struct TemplateCard: View {
                                 }
                             }
                         }
+                        .padding(.horizontal, 8)
                     }
                     .padding(.vertical, 2)
                 }
@@ -751,56 +751,92 @@ private struct TemplateButton: View {
     let selected: Bool
     let playbackEnabled: Bool
     var action: () -> Void
+    @State private var isShowingFullPreview = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 10) {
-                ZStack(alignment: .bottomLeading) {
-                    TemplatePreviewVideo(template: template, playbackEnabled: playbackEnabled)
+        VStack(alignment: .leading, spacing: 10) {
+            ZStack(alignment: .bottomLeading) {
+                TemplatePreviewVideo(template: template, playbackEnabled: playbackEnabled)
 
-                    Text(template.name)
-                        .font(.system(size: 10, weight: .bold, design: .rounded))
-                        .foregroundStyle(Brand.ink)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .nativeGlassPanel(cornerRadius: 6)
-                        .padding(8)
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button {
+                            isShowingFullPreview = true
+                        } label: {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(Brand.ink)
+                                .frame(width: 30, height: 30)
+                                .nativeGlassPanel(cornerRadius: 15, interactive: true)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Preview \(template.name) full screen")
+                    }
+                    Spacer()
                 }
-                .frame(width: 150, height: 224)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(Brand.line, lineWidth: 1)
-                }
+                .padding(.top, 14)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(template.name)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(Brand.ink)
-                        .lineLimit(1)
-                    Text(template.description)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Brand.muted)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text(template.name)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(Brand.ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .nativeGlassPanel(cornerRadius: 6)
+                    .padding(8)
             }
-            .frame(width: 150, alignment: .leading)
-            .padding(10)
-            .nativeGlassPanel(cornerRadius: 8, interactive: true)
+            .frame(width: 150, height: 267)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
-                if selected {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(.primary.opacity(0.35), lineWidth: 1.5)
-                } else {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(.quaternary, lineWidth: 1)
-                }
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Brand.line, lineWidth: 1)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(template.name)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Brand.ink)
+                    .lineLimit(1)
+                Text(template.description)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Brand.muted)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .buttonStyle(.plain)
+        .frame(width: 150, alignment: .leading)
+        .padding(10)
+        .nativeGlassPanel(cornerRadius: 8, interactive: true)
+        .overlay {
+            if selected {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Brand.navy, lineWidth: 2.5)
+            } else {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(.quaternary, lineWidth: 1)
+            }
+        }
+        .shadow(color: selected ? Brand.navy.opacity(0.20) : .clear, radius: 10, x: 0, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture(perform: action)
+        #if os(iOS)
+        .fullScreenCover(isPresented: $isShowingFullPreview) {
+            if let url = template.previewVideoURL {
+                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPreview)
+            }
+        }
+        #else
+        .sheet(isPresented: $isShowingFullPreview) {
+            if let url = template.previewVideoURL {
+                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPreview)
+                    .frame(minWidth: 420, minHeight: 680)
+            }
+        }
+        #endif
     }
 }
 
@@ -808,10 +844,9 @@ private struct TemplatePreviewVideo: View {
     let template: CaptionTemplate
     let playbackEnabled: Bool
     @State private var player: AVPlayer?
-    @State private var isHovering = false
 
     private var shouldPlay: Bool {
-        playbackEnabled && isHovering
+        playbackEnabled
     }
 
     var body: some View {
@@ -837,7 +872,7 @@ private struct TemplatePreviewVideo: View {
                 }
             }
 
-            if shouldPlay, let player {
+            if let player {
                 PlayerLayerView(player: player, videoGravity: .resizeAspectFill)
                     .transition(.opacity.animation(.easeOut(duration: 0.16)))
             }
@@ -868,11 +903,6 @@ private struct TemplatePreviewVideo: View {
             currentItem.seek(to: .zero, completionHandler: nil)
             player?.play()
         }
-        #if os(macOS)
-        .onHover { hovering in
-            isHovering = hovering
-        }
-        #endif
     }
 
     private func updatePlayback() {
@@ -1054,19 +1084,29 @@ private struct AspectRatioControl: View {
 private struct PlacementControl: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
 
+    private let rows: [[CaptionPlacement]] = [
+        [.none, .bottom],
+        [.top, .middle]
+    ]
+
     var body: some View {
         LiquidGlassGroup(spacing: 8) {
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], spacing: 8) {
-                ForEach(CaptionPlacement.allCases) { placement in
-                    OptionChip(
-                        title: placement.label,
-                        systemImage: icon(for: placement),
-                        selected: placement == viewModel.placement
-                    ) {
-                        viewModel.selectPlacement(placement)
+            VStack(spacing: 8) {
+                ForEach(rows, id: \.self) { row in
+                    HStack(spacing: 8) {
+                        ForEach(row) { placement in
+                            OptionChip(
+                                title: placement.label,
+                                systemImage: icon(for: placement),
+                                selected: placement == viewModel.placement
+                            ) {
+                                viewModel.selectPlacement(placement)
+                            }
+                        }
                     }
                 }
             }
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -1100,14 +1140,15 @@ private struct OptionChip: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .nativeGlassButton()
+        .buttonStyle(.plain)
+        .nativeGlassCapsule(interactive: true)
         .overlay {
             if selected {
                 Capsule()
                     .stroke(.primary.opacity(0.24), lineWidth: 1.25)
             }
         }
-        .frame(minWidth: 86, maxWidth: 132)
+        .frame(minWidth: 86, maxWidth: .infinity)
     }
 
     private var chipLabel: some View {
@@ -1136,15 +1177,13 @@ private struct CoreRenderOptionsCard: View {
                         .frame(width: 30, height: 30)
                         .nativeGlassPanel(cornerRadius: 7)
 
-                    Text("Render Settings")
+                    Text("Advanced Settings")
                         .font(.system(size: 18, weight: .bold, design: .rounded))
                         .foregroundStyle(Brand.ink)
                     Spacer(minLength: 0)
 
                     Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            isExpanded.toggle()
-                        }
+                        isExpanded.toggle()
                     } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .frame(width: 34, height: 34)
@@ -1184,7 +1223,7 @@ private struct CoreRenderOptionsCard: View {
 
                         Toggle(
                             isOn: Binding(
-                                get: { viewModel.placement == .none || (viewModel.faceTrackApplies && viewModel.faceTrack) },
+                                get: { viewModel.faceTrack },
                                 set: { viewModel.setFaceTrack($0) }
                             )
                         ) {
@@ -1192,8 +1231,6 @@ private struct CoreRenderOptionsCard: View {
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(Brand.ink)
                         }
-                        .disabled(!viewModel.faceTrackApplies && viewModel.placement != .none)
-                        .opacity((viewModel.faceTrackApplies || viewModel.placement == .none) ? 1 : 0.55)
 
                         VStack(alignment: .leading, spacing: 7) {
                             Text("Advanced")
@@ -1203,10 +1240,11 @@ private struct CoreRenderOptionsCard: View {
                             SRTAttachmentControl(viewModel: viewModel, onPickSRT: onPickSRT)
                         }
                     }
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.identity)
                 }
             }
         }
+        .animation(nil, value: isExpanded)
         .task(id: viewModel.selectedLanguage) {
             await viewModel.refreshLocalTranscriptionSupport()
         }
@@ -1312,7 +1350,7 @@ private struct SRTAttachmentControl: View {
 
 private struct LocalQueueCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
-    var onDownload: (LocalUploadQueueItem) -> Void
+    var onOpen: (LocalUploadQueueItem) -> Void
 
     var body: some View {
         BrandCard {
@@ -1338,7 +1376,7 @@ private struct LocalQueueCard: View {
                 } else {
                     VStack(spacing: 10) {
                         ForEach(viewModel.uploadQueue) { item in
-                            LocalQueueRow(item: item, onDownload: { onDownload(item) })
+                            LocalQueueRow(item: item, onOpen: { onOpen(item) })
                         }
                     }
                 }
@@ -1349,48 +1387,51 @@ private struct LocalQueueCard: View {
 
 private struct LocalQueueRow: View {
     let item: LocalUploadQueueItem
-    var onDownload: () -> Void
+    var onOpen: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "video.fill")
-                    .foregroundStyle(Brand.navy)
-                Text(item.fileName)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Brand.ink)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Text(item.status)
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(.secondary)
-            }
+        Button(action: onOpen) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Image(systemName: "video.fill")
+                        .foregroundStyle(Brand.navy)
+                    Text(item.fileName)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Brand.ink)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text(item.status)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
 
-            HStack(spacing: 8) {
-                MetricPill(text: item.aspectRatio, systemImage: "rectangle.on.rectangle")
-                MetricPill(text: item.templateId, systemImage: "sparkles")
-                if let creditsLabel = item.creditsLabel {
-                    MetricPill(text: creditsLabel, systemImage: "sparkles.tv")
+                HStack(spacing: 8) {
+                    MetricPill(text: item.aspectRatio, systemImage: "rectangle.on.rectangle")
+                    MetricPill(text: item.templateId, systemImage: "sparkles")
+                    if let creditsLabel = item.creditsLabel {
+                        MetricPill(text: creditsLabel, systemImage: "sparkles.tv")
+                    }
+                    if let timeRemaining = item.downloadTimeRemainingLabel {
+                        MetricPill(text: timeRemaining, systemImage: "timer")
+                    }
+                    if let outputFileName = item.outputFileName {
+                        MetricPill(text: outputFileName, systemImage: "square.and.arrow.down")
+                    }
                 }
-                if let timeRemaining = item.downloadTimeRemainingLabel {
-                    MetricPill(text: timeRemaining, systemImage: "timer")
-                }
-                if let outputFileName = item.outputFileName {
-                    MetricPill(text: outputFileName, systemImage: "square.and.arrow.down")
-                }
-            }
 
-            if item.isDownloadAvailable {
-                Button(action: onDownload) {
-                    Label("Download", systemImage: "arrow.down.to.line")
+                if item.isDownloadAvailable {
+                    Label("Open result", systemImage: "play.rectangle.fill")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .nativeGlassCapsule(interactive: true)
                 }
-                .nativeGlassButton()
             }
+            .padding(10)
+            .nativeGlassPanel(cornerRadius: 8, interactive: true)
         }
-        .padding(10)
-        .nativeGlassPanel(cornerRadius: 8)
+        .buttonStyle(.plain)
+        .disabled(!item.isDownloadAvailable)
     }
 }
 
@@ -1689,10 +1730,7 @@ private struct RenderProgressOverlay: View {
                         progress: viewModel.progress,
                         autoplay: false
                     )
-                    .frame(
-                        width: min(proxy.size.width * 0.68, 360),
-                        height: min(proxy.size.height * 0.58, 640)
-                    )
+                    .frame(size: overlayPreviewSize(in: proxy.size, aspectRatio: viewModel.aspectRatio.previewAspect))
 
                     Text(detailText)
                         .font(.system(size: 14, weight: .medium))
@@ -1725,6 +1763,7 @@ private struct RenderProgressPreview: View {
     let url: URL?
     let progress: Double
     var autoplay = false
+    var showsProgressBorder = true
     @State private var player: AVPlayer?
 
     private var clampedProgress: Double {
@@ -1733,22 +1772,26 @@ private struct RenderProgressPreview: View {
 
     var body: some View {
         ZStack {
-            RoundedRectProgressShape(progress: 1, cornerRadius: 34, inset: 4)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 8)
+            if showsProgressBorder {
+                RoundedRectProgressShape(progress: 1, cornerRadius: 34, inset: 4)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 8)
+            }
 
             if let player {
                 PlayerLayerView(player: player, videoGravity: .resizeAspectFill)
                     .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
-                    .padding(18)
+                    .padding(showsProgressBorder ? 18 : 0)
             } else {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
                     .fill(Brand.surface)
-                    .padding(18)
+                    .padding(showsProgressBorder ? 18 : 0)
             }
 
-            RoundedRectProgressShape(progress: clampedProgress, cornerRadius: 34, inset: 4)
-                .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                .animation(.easeInOut(duration: 0.25), value: clampedProgress)
+            if showsProgressBorder {
+                RoundedRectProgressShape(progress: clampedProgress, cornerRadius: 34, inset: 4)
+                    .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+                    .animation(.easeInOut(duration: 0.25), value: clampedProgress)
+            }
         }
         .onAppear {
             configurePlayer()
@@ -1785,6 +1828,27 @@ private struct RenderProgressPreview: View {
             nextPlayer.play()
         }
         player = nextPlayer
+    }
+}
+
+private func overlayPreviewSize(
+    in container: CGSize,
+    aspectRatio: CGFloat,
+    maxWidthFraction: CGFloat = 0.68,
+    maxWidth: CGFloat = 360,
+    maxHeightFraction: CGFloat = 0.58,
+    maxHeight: CGFloat = 640
+) -> CGSize {
+    let safeAspect = max(0.2, min(4, aspectRatio))
+    let availableWidth = min(container.width * maxWidthFraction, maxWidth)
+    let availableHeight = min(container.height * maxHeightFraction, maxHeight)
+    let width = min(availableWidth, availableHeight * safeAspect)
+    return CGSize(width: width, height: width / safeAspect)
+}
+
+private extension View {
+    func frame(size: CGSize) -> some View {
+        frame(width: size.width, height: size.height)
     }
 }
 
@@ -1882,10 +1946,19 @@ private struct OutputReadyOverlay: View {
                 ScrollView {
                     VStack(spacing: 24) {
                         if let previewURL = viewModel.resultPreviewURL {
-                            RenderProgressPreview(url: previewURL, progress: 1, autoplay: true)
+                            RenderProgressPreview(
+                                url: previewURL,
+                                progress: 1,
+                                autoplay: true,
+                                showsProgressBorder: false
+                            )
                                 .frame(
-                                    width: min(proxy.size.width * 0.68, 360),
-                                    height: min(proxy.size.height * 0.48, 560)
+                                    size: overlayPreviewSize(
+                                        in: proxy.size,
+                                        aspectRatio: (viewModel.resultAspectRatio ?? viewModel.aspectRatio).previewAspect,
+                                        maxHeightFraction: 0.54,
+                                        maxHeight: 590
+                                    )
                                 )
 
                             ShareDestinationGrid(viewModel: viewModel, onSaveOutput: onDownload)
@@ -1895,6 +1968,9 @@ private struct OutputReadyOverlay: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 92)
                     .padding(.bottom, 36)
+                }
+                .task(id: viewModel.resultPreviewURL) {
+                    viewModel.cacheCurrentOutput()
                 }
 
                 Button(action: onClose) {
@@ -2025,15 +2101,15 @@ private struct ShareDestinationTile: View {
             ZStack {
                 if isLoading {
                     ProgressView()
-                        .tint(.white)
+                        .tint(Brand.navy)
                 } else {
                     Image(systemName: systemImage)
                         .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(Brand.navy)
                 }
             }
-            .frame(width: 66, height: 66)
-            .background(Color(hex: 0x20242B), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .frame(width: 70, height: 70)
+            .nativeGlassPanel(cornerRadius: 18, interactive: true)
 
             Text(title)
                 .font(.system(size: 12, weight: .bold, design: .rounded))

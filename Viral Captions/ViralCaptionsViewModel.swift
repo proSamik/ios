@@ -65,6 +65,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var outputSuggestedFileName: String?
     @Published var outputDownloadExpiresAt: Date?
     @Published var outputFileSize: Int64?
+    @Published var resultAspectRatio: OutputAspectRatio?
     @Published var alert: AppMessage?
     @Published var uploadQueue: [LocalUploadQueueItem]
     @Published var localTranscriptionSupported = false
@@ -77,6 +78,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     private let client = SubclipAPIClient()
     private var pollTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
+    private var outputCacheTask: Task<URL?, Never>?
     private var importedVideoURL: URL?
 
     init() {
@@ -119,23 +121,15 @@ final class ViralCaptionsViewModel: ObservableObject {
     }
 
     var effectiveFaceTrack: Bool {
-        faceTrack && (placement == .none || faceTrackApplies)
+        faceTrack
     }
 
     func selectPlacement(_ nextPlacement: CaptionPlacement) {
         placement = nextPlacement
-        if nextPlacement == .none {
-            faceTrack = true
-        }
     }
 
     func setFaceTrack(_ isEnabled: Bool) {
         faceTrack = isEnabled
-        if isEnabled {
-            placement = .none
-        } else if placement == .none {
-            placement = .bottom
-        }
     }
 
     func saveAPIKey() {
@@ -222,11 +216,14 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     func resetResult() {
         pollTask?.cancel()
+        outputCacheTask?.cancel()
+        outputCacheTask = nil
         outputURL = nil
         outputRemoteURL = nil
         outputSuggestedFileName = nil
         outputDownloadExpiresAt = nil
         outputFileSize = nil
+        resultAspectRatio = nil
         latestStatus = nil
         estimatedCredits = nil
         creditsUsed = nil
@@ -412,11 +409,14 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
 
         do {
+            outputCacheTask?.cancel()
+            outputCacheTask = nil
             outputURL = nil
             outputRemoteURL = nil
             outputSuggestedFileName = nil
             outputDownloadExpiresAt = nil
             outputFileSize = nil
+            resultAspectRatio = nil
             latestStatus = nil
             creditsUsed = nil
             projectId = nil
@@ -501,6 +501,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             outputSuggestedFileName = info.fileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
             outputDownloadExpiresAt = downloadExpiryDate(from: info)
             outputFileSize = info.fileSize
+            resultAspectRatio = aspectRatio
             phase = .completed
             progress = 1
             statusMessage = "Ready to download."
@@ -550,12 +551,37 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
     }
 
+    func cacheCurrentOutput() {
+        guard outputURL == nil, outputRemoteURL != nil, outputCacheTask == nil else { return }
+        outputCacheTask = Task { @MainActor [weak self] in
+            await self?.downloadCurrentOutput(showAlertOnFailure: false)
+        }
+    }
+
     func downloadCurrentOutput() async -> URL? {
         if let outputURL {
             return outputURL
         }
+
+        if let outputCacheTask {
+            let cachedURL = await outputCacheTask.value
+            self.outputCacheTask = nil
+            if let cachedURL {
+                return cachedURL
+            }
+        }
+
+        return await downloadCurrentOutput(showAlertOnFailure: true)
+    }
+
+    private func downloadCurrentOutput(showAlertOnFailure: Bool) async -> URL? {
+        if let outputURL {
+            return outputURL
+        }
         guard let outputRemoteURL else {
-            alert = AppMessage(title: "Download unavailable", message: "The rendered MP4 is not ready yet.")
+            if showAlertOnFailure {
+                alert = AppMessage(title: "Download unavailable", message: "The rendered MP4 is not ready yet.")
+            }
             return nil
         }
 
@@ -567,37 +593,53 @@ final class ViralCaptionsViewModel: ObservableObject {
                 suggestedFileName: outputSuggestedFileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
             )
             outputURL = localURL
+            outputCacheTask = nil
             phase = .completed
             statusMessage = "Downloaded."
             return localURL
         } catch {
+            outputCacheTask = nil
             phase = .completed
-            alert = AppMessage(title: "Could not download MP4", message: error.localizedDescription)
+            if showAlertOnFailure {
+                alert = AppMessage(title: "Could not download MP4", message: error.localizedDescription)
+            }
             return nil
         }
     }
 
     func downloadHistoryItem(_ item: LocalUploadQueueItem) async -> URL? {
+        guard await openHistoryItem(item) else { return nil }
+        return await downloadCurrentOutput()
+    }
+
+    func openHistoryItem(_ item: LocalUploadQueueItem) async -> Bool {
         guard item.isDownloadAvailable else {
             alert = AppMessage(title: "Download expired", message: "This history item is past the 58-minute download window.")
-            return nil
+            return false
         }
 
         let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedKey.isEmpty else {
             alert = AppMessage(title: "API key required", message: "Enter a Subclip API key to refresh this download.")
-            return nil
+            return false
         }
 
         do {
             let info = try await client.downloadInfo(apiKey: trimmedKey, projectId: item.projectId)
             let fileName = info.fileName ?? item.outputFileName ?? "captioned-video.mp4"
-            let localURL = try await client.downloadFile(from: info.downloadUrl, suggestedFileName: fileName)
-            outputURL = localURL
+            outputCacheTask?.cancel()
+            outputCacheTask = nil
+            outputURL = nil
             outputRemoteURL = info.downloadUrl
             outputSuggestedFileName = fileName
             outputFileSize = info.fileSize
             outputDownloadExpiresAt = downloadExpiryDate(from: info)
+            resultAspectRatio = OutputAspectRatio(rawValue: item.aspectRatio) ?? .vertical
+            projectId = item.projectId
+            phase = .completed
+            progress = 1
+            statusMessage = "Ready to download."
+            creditsUsed = item.creditsUsed
             updateQueueItem(
                 projectId: item.projectId,
                 status: "Completed",
@@ -606,10 +648,10 @@ final class ViralCaptionsViewModel: ObservableObject {
                 creditsUsed: item.creditsUsed,
                 downloadExpiresAt: outputDownloadExpiresAt
             )
-            return localURL
+            return true
         } catch {
-            alert = AppMessage(title: "Could not download MP4", message: error.localizedDescription)
-            return nil
+            alert = AppMessage(title: "Could not open history item", message: error.localizedDescription)
+            return false
         }
     }
 
