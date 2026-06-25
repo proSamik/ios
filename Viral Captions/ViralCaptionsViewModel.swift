@@ -164,6 +164,16 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
     }
 
+    func cancelRender() {
+        pollTask?.cancel()
+        pollTask = nil
+        if isRendering {
+            phase = .idle
+            progress = 0
+            statusMessage = selectedVideo == nil ? "Choose a video to begin." : "Ready to add captions."
+        }
+    }
+
     func beginVideoImport() {
         resetResult()
         isImportingVideo = true
