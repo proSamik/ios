@@ -292,6 +292,9 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
     let createdAt: Date
     var status: String
     var outputFileName: String?
+    var outputFileSize: Int64?
+    var creditsUsed: Double?
+    var downloadExpiresAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -301,7 +304,10 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
         aspectRatio: String,
         createdAt: Date = Date(),
         status: String,
-        outputFileName: String? = nil
+        outputFileName: String? = nil,
+        outputFileSize: Int64? = nil,
+        creditsUsed: Double? = nil,
+        downloadExpiresAt: Date? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -311,6 +317,26 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
         self.createdAt = createdAt
         self.status = status
         self.outputFileName = outputFileName
+        self.outputFileSize = outputFileSize
+        self.creditsUsed = creditsUsed
+        self.downloadExpiresAt = downloadExpiresAt
+    }
+
+    var isDownloadAvailable: Bool {
+        guard status == "Completed", let downloadExpiresAt else { return false }
+        return Date() < downloadExpiresAt
+    }
+
+    var downloadTimeRemainingLabel: String? {
+        guard let downloadExpiresAt else { return nil }
+        let remaining = max(0, Int(downloadExpiresAt.timeIntervalSinceNow / 60))
+        if remaining <= 0 { return "Expired" }
+        return "\(remaining)m left"
+    }
+
+    var creditsLabel: String? {
+        guard let creditsUsed else { return nil }
+        return "\(creditsUsed.formatted(.number.precision(.fractionLength(2)))) credits"
     }
 }
 

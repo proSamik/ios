@@ -18,8 +18,7 @@ struct ContentView: View {
     @State private var showingVideoImporter = false
     @State private var showingSRTImporter = false
     @State private var selectedTab: AppTab = .create
-    @State private var autoSavedOutputURL: URL?
-    @State private var outputSavedToPhotos = false
+    @State private var isShowingResultScreen = false
     @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearance.light.rawValue
     #if os(iOS)
     @State private var selectedVideoItem: PhotosPickerItem?
@@ -58,16 +57,11 @@ struct ContentView: View {
             ) { result in
                 handleImport(result, mediaType: .srt)
             }
-            .onChange(of: viewModel.outputURL) { _, outputURL in
-                guard let outputURL else {
-                    autoSavedOutputURL = nil
-                    outputSavedToPhotos = false
-                    return
-                }
-                guard autoSavedOutputURL != outputURL else { return }
-                autoSavedOutputURL = outputURL
-                outputSavedToPhotos = false
-                saveOutputToPhotos(outputURL, userInitiated: false)
+            .onAppear {
+                preflightPhotoPermission()
+            }
+            .onChange(of: viewModel.resultPreviewURL) { _, previewURL in
+                isShowingResultScreen = previewURL != nil
             }
             .alert(item: $viewModel.alert) { message in
                 Alert(
@@ -85,8 +79,7 @@ struct ContentView: View {
                 viewModel: viewModel,
                 onPickVideo: pickVideo,
                 onPickSRT: pickSRT,
-                onSaveOutput: saveOutput,
-                outputSavedToPhotos: outputSavedToPhotos
+                onSaveOutput: saveOutput
             )
             .tabItem {
                 Label("Create", systemImage: "wand.and.stars")
@@ -96,7 +89,8 @@ struct ContentView: View {
             NavigationStack {
                 SettingsWorkspace(
                     viewModel: viewModel,
-                    appearanceModeRaw: $appearanceModeRaw
+                    appearanceModeRaw: $appearanceModeRaw,
+                    onDownloadHistory: downloadHistory
                 )
                 .navigationTitle("Settings")
                 #if os(iOS)
@@ -113,6 +107,13 @@ struct ContentView: View {
             if viewModel.isRendering {
                 RenderProgressOverlay(viewModel: viewModel)
                     .transition(.opacity)
+            } else if isShowingResultScreen, viewModel.resultPreviewURL != nil {
+                OutputReadyOverlay(
+                    viewModel: viewModel,
+                    onClose: { isShowingResultScreen = false },
+                    onDownload: saveOutput
+                )
+                .transition(.opacity)
             }
         }
     }
@@ -161,7 +162,15 @@ struct ContentView: View {
     }
 
     private func saveOutput() {
-        guard let outputURL = viewModel.outputURL else { return }
+        Task {
+            guard let outputURL = await viewModel.downloadCurrentOutput() else { return }
+            await MainActor.run {
+                saveURL(outputURL)
+            }
+        }
+    }
+
+    private func saveURL(_ outputURL: URL) {
         #if os(macOS)
         let panel = NSSavePanel()
         panel.title = "Save MP4"
@@ -175,17 +184,30 @@ struct ContentView: View {
             }
         }
         #else
-        saveOutputToPhotos(outputURL, userInitiated: true)
+        saveOutputToPhotos(outputURL)
         #endif
     }
 
-    #if os(iOS)
-    private func saveOutputToPhotos(_ outputURL: URL, userInitiated: Bool) {
-        if userInitiated && outputSavedToPhotos {
-            viewModel.alert = AppMessage(title: "Already saved", message: "This MP4 is already in Photos.")
-            return
+    private func downloadHistory(_ item: LocalUploadQueueItem) {
+        Task {
+            guard let outputURL = await viewModel.downloadHistoryItem(item) else { return }
+            await MainActor.run {
+                saveURL(outputURL)
+                isShowingResultScreen = true
+            }
         }
+    }
 
+    #if os(iOS)
+    private func preflightPhotoPermission() {
+        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        guard status == .notDetermined else { return }
+        Task {
+            _ = await requestPhotoAddAuthorization()
+        }
+    }
+
+    private func saveOutputToPhotos(_ outputURL: URL) {
         Task {
             do {
                 let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
@@ -204,10 +226,7 @@ struct ContentView: View {
                 try await writeVideoToPhotos(outputURL)
 
                 await MainActor.run {
-                    outputSavedToPhotos = true
-                    if userInitiated {
-                        viewModel.alert = AppMessage(title: "MP4 saved", message: "The rendered video was saved to Photos.")
-                    }
+                    viewModel.alert = AppMessage(title: "MP4 saved", message: "The rendered video was saved to Photos.")
                 }
             } catch {
                 await MainActor.run {
@@ -366,7 +385,6 @@ private struct CreateWorkspace: View {
     var onPickVideo: () -> Void
     var onPickSRT: () -> Void
     var onSaveOutput: () -> Void
-    var outputSavedToPhotos: Bool
 
     var body: some View {
         GeometryReader { proxy in
@@ -388,11 +406,10 @@ private struct CreateWorkspace: View {
                                     CoreRenderOptionsCard(viewModel: viewModel, onPickSRT: onPickSRT)
                                     RenderCard(viewModel: viewModel)
                                 }
-                                if viewModel.outputURL != nil {
+                                if viewModel.hasResult {
                                     ResultCard(
                                         viewModel: viewModel,
-                                        onSaveOutput: onSaveOutput,
-                                        outputSavedToPhotos: outputSavedToPhotos
+                                        onSaveOutput: onSaveOutput
                                     )
                                 }
                             }
@@ -409,11 +426,10 @@ private struct CreateWorkspace: View {
                                 CoreRenderOptionsCard(viewModel: viewModel, onPickSRT: onPickSRT)
                                 RenderCard(viewModel: viewModel)
                             }
-                            if viewModel.outputURL != nil {
+                            if viewModel.hasResult {
                                 ResultCard(
                                     viewModel: viewModel,
-                                    onSaveOutput: onSaveOutput,
-                                    outputSavedToPhotos: outputSavedToPhotos
+                                    onSaveOutput: onSaveOutput
                                 )
                             }
                         }
@@ -432,6 +448,7 @@ private struct CreateWorkspace: View {
 private struct SettingsWorkspace: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     @Binding var appearanceModeRaw: String
+    var onDownloadHistory: (LocalUploadQueueItem) -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -446,7 +463,7 @@ private struct SettingsWorkspace: View {
                             .frame(maxWidth: 520)
 
                             VStack(spacing: 18) {
-                                LocalQueueCard(viewModel: viewModel)
+                                LocalQueueCard(viewModel: viewModel, onDownload: onDownloadHistory)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -454,7 +471,7 @@ private struct SettingsWorkspace: View {
                         VStack(spacing: 18) {
                             APIKeyCard(viewModel: viewModel)
                             ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
-                            LocalQueueCard(viewModel: viewModel)
+                            LocalQueueCard(viewModel: viewModel, onDownload: onDownloadHistory)
                         }
                     }
                 }
@@ -1252,12 +1269,13 @@ private struct SRTAttachmentControl: View {
 
 private struct LocalQueueCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    var onDownload: (LocalUploadQueueItem) -> Void
 
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 10) {
-                    CardHeader(title: "Local Queue", systemImage: "tray.full.fill")
+                    CardHeader(title: "History", systemImage: "clock.arrow.circlepath")
                     if !viewModel.uploadQueue.isEmpty {
                         Button {
                             viewModel.clearUploadQueue()
@@ -1271,13 +1289,13 @@ private struct LocalQueueCard: View {
                 }
 
                 if viewModel.uploadQueue.isEmpty {
-                    Text("Uploaded videos will appear here after a render starts.")
+                    Text("Completed caption renders will appear here for quick download.")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Brand.slate)
                 } else {
                     VStack(spacing: 10) {
                         ForEach(viewModel.uploadQueue) { item in
-                            LocalQueueRow(item: item)
+                            LocalQueueRow(item: item, onDownload: { onDownload(item) })
                         }
                     }
                 }
@@ -1288,6 +1306,7 @@ private struct LocalQueueCard: View {
 
 private struct LocalQueueRow: View {
     let item: LocalUploadQueueItem
+    var onDownload: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1307,9 +1326,24 @@ private struct LocalQueueRow: View {
             HStack(spacing: 8) {
                 MetricPill(text: item.aspectRatio, systemImage: "rectangle.on.rectangle")
                 MetricPill(text: item.templateId, systemImage: "sparkles")
+                if let creditsLabel = item.creditsLabel {
+                    MetricPill(text: creditsLabel, systemImage: "sparkles.tv")
+                }
+                if let timeRemaining = item.downloadTimeRemainingLabel {
+                    MetricPill(text: timeRemaining, systemImage: "timer")
+                }
                 if let outputFileName = item.outputFileName {
                     MetricPill(text: outputFileName, systemImage: "square.and.arrow.down")
                 }
+            }
+
+            if item.isDownloadAvailable {
+                Button(action: onDownload) {
+                    Label("Download", systemImage: "arrow.down.to.line")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .frame(maxWidth: .infinity)
+                }
+                .nativeGlassButton()
             }
         }
         .padding(10)
@@ -1405,9 +1439,22 @@ private struct RenderCard: View {
 
 private struct RenderProgressOverlay: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    @Environment(\.colorScheme) private var colorScheme
 
     private var percent: Int {
         Int((viewModel.progress * 100).rounded())
+    }
+
+    private var backgroundColor: Color {
+        colorScheme == .dark ? .black : Brand.softSurface
+    }
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Brand.ink
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .white.opacity(0.66) : Brand.slate
     }
 
     private var detailText: String {
@@ -1428,8 +1475,7 @@ private struct RenderProgressOverlay: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .topTrailing) {
-                Color.black
-                    .opacity(0.96)
+                backgroundColor
                     .ignoresSafeArea()
 
                 VStack(spacing: 28) {
@@ -1438,10 +1484,10 @@ private struct RenderProgressOverlay: View {
                     VStack(spacing: 10) {
                         Text("\(percent)%")
                             .font(.system(size: 42, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(primaryTextColor)
                         Text(viewModel.phase.label)
                             .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.72))
+                            .foregroundStyle(secondaryTextColor)
                     }
 
                     RenderProgressPreview(
@@ -1455,7 +1501,7 @@ private struct RenderProgressOverlay: View {
 
                     Text(detailText)
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(secondaryTextColor)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 32)
 
@@ -1468,9 +1514,9 @@ private struct RenderProgressOverlay: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(primaryTextColor)
                         .frame(width: 48, height: 48)
-                        .background(.white.opacity(0.12), in: Circle())
+                        .background(Brand.surface.opacity(0.7), in: Circle())
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 18)
@@ -1488,7 +1534,7 @@ private struct RenderProgressPreview: View {
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .stroke(.white.opacity(0.16), lineWidth: 8)
+                .stroke(Brand.line, lineWidth: 8)
 
             if let player {
                 PlayerLayerView(player: player, videoGravity: .resizeAspectFill)
@@ -1496,25 +1542,12 @@ private struct RenderProgressPreview: View {
                     .padding(18)
             } else {
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .fill(.white.opacity(0.08))
+                    .fill(Brand.surface)
                     .padding(18)
             }
 
-            RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .trim(from: 0, to: CGFloat(min(1, max(0.02, progress))))
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            Color(hex: 0x8B3DFF),
-                            Color(hex: 0xEC008C),
-                            Color(hex: 0xFF5B22),
-                            Color(hex: 0x8B3DFF)
-                        ],
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round)
-                )
-                .rotationEffect(.degrees(-90))
+            RectangleProgressBorder(progress: progress)
+                .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
         }
         .onAppear {
             configurePlayer()
@@ -1526,6 +1559,14 @@ private struct RenderProgressPreview: View {
             player?.pause()
             player?.replaceCurrentItem(with: nil)
             player = nil
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
+            guard let currentItem = player?.currentItem,
+                  notification.object as? AVPlayerItem === currentItem else {
+                return
+            }
+            currentItem.seek(to: .zero, completionHandler: nil)
+            player?.play()
         }
     }
 
@@ -1544,28 +1585,131 @@ private struct RenderProgressPreview: View {
     }
 }
 
+private struct RectangleProgressBorder: Shape {
+    let progress: Double
+
+    func path(in rect: CGRect) -> Path {
+        let progress = CGFloat(max(0, min(1, progress)))
+        let insetRect = rect.insetBy(dx: 4, dy: 4)
+        let width = insetRect.width
+        let height = insetRect.height
+        let perimeter = max(1, (width + height) * 2)
+        var remaining = perimeter * progress
+        var path = Path()
+
+        func consume(_ length: CGFloat) -> CGFloat {
+            let used = min(remaining, length)
+            remaining -= used
+            return used
+        }
+
+        path.move(to: CGPoint(x: insetRect.minX, y: insetRect.minY))
+
+        let top = consume(width)
+        path.addLine(to: CGPoint(x: insetRect.minX + top, y: insetRect.minY))
+        guard remaining > 0 else { return path }
+
+        let right = consume(height)
+        path.addLine(to: CGPoint(x: insetRect.maxX, y: insetRect.minY + right))
+        guard remaining > 0 else { return path }
+
+        let bottom = consume(width)
+        path.addLine(to: CGPoint(x: insetRect.maxX - bottom, y: insetRect.maxY))
+        guard remaining > 0 else { return path }
+
+        let left = consume(height)
+        path.addLine(to: CGPoint(x: insetRect.minX, y: insetRect.maxY - left))
+
+        return path
+    }
+}
+
+private struct OutputReadyOverlay: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+    var onClose: () -> Void
+    var onDownload: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var backgroundColor: Color {
+        colorScheme == .dark ? .black : Brand.softSurface
+    }
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Brand.ink
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .white.opacity(0.70) : Brand.slate
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topTrailing) {
+                backgroundColor.ignoresSafeArea()
+
+                VStack(spacing: 28) {
+                    Spacer(minLength: proxy.size.height * 0.08)
+
+                    VStack(spacing: 10) {
+                        Text("100%")
+                            .font(.system(size: 42, weight: .bold, design: .rounded))
+                            .foregroundStyle(primaryTextColor)
+                        Text("Ready to share")
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .foregroundStyle(secondaryTextColor)
+                    }
+
+                    if let previewURL = viewModel.resultPreviewURL {
+                        RenderProgressPreview(url: previewURL, progress: 1)
+                            .frame(
+                                width: min(proxy.size.width * 0.68, 360),
+                                height: min(proxy.size.height * 0.58, 640)
+                            )
+
+                        ShareDestinationGrid(outputURL: previewURL, onSaveOutput: onDownload)
+                            .padding(.horizontal, 24)
+                    }
+
+                    Spacer(minLength: proxy.size.height * 0.04)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(primaryTextColor)
+                        .frame(width: 52, height: 52)
+                        .background(Brand.surface.opacity(0.74), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 20)
+                .padding(.trailing, 20)
+            }
+        }
+    }
+}
+
 private struct ResultCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onSaveOutput: () -> Void
-    var outputSavedToPhotos: Bool
 
     var body: some View {
         BrandCard {
             VStack(alignment: .center, spacing: 18) {
                 CardHeader(title: "Ready to Share", systemImage: "square.and.arrow.up.fill")
 
-                Text(outputSavedToPhotos ? "Saved to Photos." : "Your captioned MP4 is ready.")
+                Text("Your captioned MP4 is ready.")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(Brand.slate)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                if let outputURL = viewModel.outputURL {
-                    VideoPreview(url: viewModel.outputURL)
+                if let previewURL = viewModel.resultPreviewURL {
+                    VideoPreview(url: previewURL)
                         .aspectRatio(viewModel.aspectRatio.previewAspect, contentMode: .fit)
                         .frame(maxWidth: viewModel.aspectRatio.previewMaxWidth)
                         .frame(maxWidth: .infinity)
 
-                    ShareDestinationGrid(outputURL: outputURL, onSaveOutput: onSaveOutput)
+                    ShareDestinationGrid(outputURL: previewURL, onSaveOutput: onSaveOutput)
                 }
             }
         }
