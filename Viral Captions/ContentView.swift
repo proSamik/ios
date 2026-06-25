@@ -536,10 +536,11 @@ private struct MediaCard: View {
                             VideoPickerButtonLabel(
                                 title: videoButtonTitle,
                                 isLoading: viewModel.isImportingVideo,
-                                progress: viewModel.videoImportProgress
+                                progress: viewModel.videoImportProgress,
+                                prominent: viewModel.selectedVideo == nil
                             )
                         }
-                        .nativeGlassButton(prominent: viewModel.selectedVideo == nil && !viewModel.isImportingVideo)
+                        .nativeGlassButton(prominent: viewModel.selectedVideo == nil)
 
                         if viewModel.selectedVideo != nil {
                             Button {
@@ -570,6 +571,7 @@ private struct VideoPickerButtonLabel: View {
     let title: String
     let isLoading: Bool
     let progress: Double
+    let prominent: Bool
 
     var body: some View {
         VStack(spacing: 12) {
@@ -577,19 +579,21 @@ private struct VideoPickerButtonLabel: View {
                 if isLoading {
                     ProgressView()
                         .controlSize(.small)
+                        .tint(prominent ? .white : Brand.ink)
                 } else {
                     Image(systemName: "plus")
                 }
 
                 Text(title)
                     .font(.system(size: 18, weight: .bold, design: .rounded))
-                    .foregroundStyle(Brand.ink)
             }
+            .foregroundStyle(prominent ? .white : Brand.ink)
             .frame(maxWidth: .infinity)
 
             if isLoading {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
+                    .tint(prominent ? .white : Brand.navy)
                     .frame(maxWidth: 220)
             }
         }
