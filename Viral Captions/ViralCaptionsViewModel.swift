@@ -67,9 +67,16 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var outputFileSize: Int64?
     @Published var alert: AppMessage?
     @Published var uploadQueue: [LocalUploadQueueItem]
+    @Published var localTranscriptionSupported = false
+    @Published var isTranscribing = false
+    @Published var transcriptionProgress: Double = 0
+    @Published var transcriptionStatus = ""
+    @Published var isSRTEditorPresented = false
+    @Published var srtDraft = ""
 
     private let client = SubclipAPIClient()
     private var pollTask: Task<Void, Never>?
+    private var transcriptionTask: Task<Void, Never>?
     private var importedVideoURL: URL?
 
     init() {
@@ -167,6 +174,50 @@ final class ViralCaptionsViewModel: ObservableObject {
             selectedSRT?.url.stopAccessingSecurityScopedResource()
         }
         selectedSRT = nil
+        srtDraft = ""
+    }
+
+    func refreshLocalTranscriptionSupport() async {
+        localTranscriptionSupported = await LocalSpeechTranscriber.isSupported(languageCode: selectedLanguage)
+    }
+
+    func transcribeSelectedVideo() {
+        guard let selectedVideo, localTranscriptionSupported, !isTranscribing else { return }
+        transcriptionTask?.cancel()
+        transcriptionTask = Task { [weak self] in
+            await self?.runLocalTranscription(videoURL: selectedVideo.url, videoFileName: selectedVideo.fileName)
+        }
+    }
+
+    func cancelTranscription() {
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        isTranscribing = false
+        transcriptionProgress = 0
+        transcriptionStatus = ""
+    }
+
+    func openSRTEditor() {
+        guard let selectedSRT else { return }
+        do {
+            srtDraft = try String(contentsOf: selectedSRT.url, encoding: .utf8)
+            isSRTEditorPresented = true
+        } catch {
+            alert = AppMessage(title: "Could not open SRT", message: error.localizedDescription)
+        }
+    }
+
+    func saveSRTDraft() {
+        let text = srtDraft
+        let fileName = selectedSRT?.fileName ?? defaultSRTFileName()
+        Task {
+            do {
+                try await setSRTText(text, fileName: fileName)
+                isSRTEditorPresented = false
+            } catch {
+                alert = AppMessage(title: "Could not save SRT", message: error.localizedDescription)
+            }
+        }
     }
 
     func resetResult() {
@@ -282,11 +333,73 @@ final class ViralCaptionsViewModel: ObservableObject {
                 fileSize: size,
                 securityScoped: didStartScope
             )
+            srtDraft = try String(contentsOf: url, encoding: .utf8)
         } catch {
             if didStartScope {
                 url.stopAccessingSecurityScopedResource()
             }
             alert = AppMessage(title: "SRT import failed", message: error.localizedDescription)
+        }
+    }
+
+    private func setSRTText(_ text: String, fileName: String) async throws {
+        let safeFileName = sanitizedFileName(fileName, fallback: defaultSRTFileName())
+        let result = try await Task.detached(priority: .userInitiated) {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ViralCaptionsSRT", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            let outputURL = directory.appendingPathComponent(safeFileName)
+            if FileManager.default.fileExists(atPath: outputURL.path) {
+                try FileManager.default.removeItem(at: outputURL)
+            }
+            try text.write(to: outputURL, atomically: true, encoding: .utf8)
+            let size = try MediaMetadataReader.fileSize(for: outputURL)
+            return (outputURL, size)
+        }.value
+
+        removeSRT()
+        selectedSRT = SelectedSRT(
+            url: result.0,
+            fileName: safeFileName,
+            fileSize: result.1,
+            securityScoped: false
+        )
+        srtDraft = text
+    }
+
+    private func runLocalTranscription(videoURL: URL, videoFileName: String) async {
+        let languageCode = selectedLanguage
+        isTranscribing = true
+        transcriptionProgress = 0.02
+        transcriptionStatus = "Starting transcription"
+
+        do {
+            let transcript = try await LocalSpeechTranscriber.transcribeVideo(
+                at: videoURL,
+                languageCode: languageCode
+            ) { [weak self] progress, status in
+                guard let self else { return }
+                self.transcriptionProgress = progress
+                self.transcriptionStatus = status
+            }
+
+            try Task.checkCancellation()
+            let srtText = transcript.srtText
+            try await setSRTText(srtText, fileName: defaultSRTFileName(for: videoFileName))
+            transcriptionProgress = 1
+            transcriptionStatus = "Transcript ready"
+            isTranscribing = false
+            isSRTEditorPresented = true
+        } catch is CancellationError {
+            isTranscribing = false
+            transcriptionProgress = 0
+            transcriptionStatus = ""
+        } catch {
+            isTranscribing = false
+            transcriptionProgress = 0
+            transcriptionStatus = ""
+            alert = AppMessage(title: "Could not transcribe audio", message: error.localizedDescription)
         }
     }
 
@@ -552,6 +665,19 @@ final class ViralCaptionsViewModel: ObservableObject {
             options: .regularExpression
         )
         return "Captioned-\(base).mp4"
+    }
+
+    private func defaultSRTFileName() -> String {
+        defaultSRTFileName(for: selectedVideo?.fileName ?? "captions.mp4")
+    }
+
+    private func defaultSRTFileName(for fileName: String) -> String {
+        let base = fileName.replacingOccurrences(
+            of: "\\.(mp4|mov|webm|mkv|avi|m4v|mpg|mpeg)$",
+            with: "",
+            options: .regularExpression
+        )
+        return "\(base)-captions.srt"
     }
 
     private func friendlyVideoFileName(for url: URL) -> String {

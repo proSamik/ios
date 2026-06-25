@@ -104,7 +104,13 @@ struct ContentView: View {
         }
         .preferredColorScheme(appearanceMode.colorScheme)
         .overlay {
-            if viewModel.isRendering {
+            if viewModel.isTranscribing {
+                TranscriptionProgressOverlay(viewModel: viewModel)
+                    .transition(.opacity)
+            } else if viewModel.isSRTEditorPresented {
+                SRTEditorOverlay(viewModel: viewModel)
+                    .transition(.opacity)
+            } else if viewModel.isRendering {
                 RenderProgressOverlay(viewModel: viewModel)
                     .transition(.opacity)
             } else if isShowingResultScreen, viewModel.resultPreviewURL != nil {
@@ -1193,12 +1199,16 @@ private struct CoreRenderOptionsCard: View {
                             Text("Advanced")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(Brand.slate)
+                            LocalTranscriptionControl(viewModel: viewModel)
                             SRTAttachmentControl(viewModel: viewModel, onPickSRT: onPickSRT)
                         }
                     }
                     .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
+        }
+        .task(id: viewModel.selectedLanguage) {
+            await viewModel.refreshLocalTranscriptionSupport()
         }
     }
 
@@ -1232,40 +1242,70 @@ private struct CoreRenderOptionsCard: View {
     }
 }
 
+private struct LocalTranscriptionControl: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+
+    var body: some View {
+        if viewModel.localTranscriptionSupported {
+            Button {
+                viewModel.transcribeSelectedVideo()
+            } label: {
+                Label(viewModel.isTranscribing ? "Transcribing" : "Transcribe audio", systemImage: "waveform")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .frame(maxWidth: .infinity)
+            }
+            .nativeGlassButton()
+            .disabled(viewModel.selectedVideo == nil || viewModel.isTranscribing)
+        }
+    }
+}
+
 private struct SRTAttachmentControl: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onPickSRT: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Button(action: onPickSRT) {
-                Label(viewModel.selectedSRT == nil ? "Attach SRT" : "Replace SRT", systemImage: "text.badge.plus")
-                    .frame(maxWidth: .infinity)
-            }
-            .nativeGlassButton()
-
             if let srt = viewModel.selectedSRT {
-                HStack(spacing: 10) {
-                    Image(systemName: "doc.text.fill")
-                        .foregroundStyle(Brand.navy)
-                    Text(srt.fileName)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(Brand.ink)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "doc.text.fill")
+                            .foregroundStyle(Brand.navy)
+                        Text(srt.fileName)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Brand.ink)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: 0)
+                        Button {
+                            viewModel.removeSRT()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .frame(width: 30, height: 30)
+                        }
+                        .nativeGlassButton()
+                        .accessibilityLabel("Remove SRT")
+                    }
+
                     Button {
-                        viewModel.removeSRT()
+                        viewModel.openSRTEditor()
                     } label: {
-                        Image(systemName: "xmark")
-                            .frame(width: 30, height: 30)
+                        Label("Edit SRT", systemImage: "square.and.pencil")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .frame(maxWidth: .infinity)
                     }
                     .nativeGlassButton()
-                    .accessibilityLabel("Remove SRT")
                 }
                 .padding(10)
                 .nativeGlassPanel(cornerRadius: 8)
             }
+
+            Button(action: onPickSRT) {
+                Label(viewModel.selectedSRT == nil ? "Attach SRT" : "Replace SRT", systemImage: "text.badge.plus")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .frame(maxWidth: .infinity)
+            }
+            .nativeGlassButton()
         }
     }
 }
@@ -1436,6 +1476,157 @@ private struct RenderCard: View {
                     .nativeGlassPanel(cornerRadius: 8)
                 }
             }
+        }
+    }
+}
+
+private struct TranscriptionProgressOverlay: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var percent: Int {
+        Int((viewModel.transcriptionProgress * 100).rounded())
+    }
+
+    private var backgroundColor: Color {
+        colorScheme == .dark ? .black : Brand.softSurface
+    }
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Brand.ink
+    }
+
+    private var secondaryTextColor: Color {
+        colorScheme == .dark ? .white.opacity(0.66) : Brand.slate
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topTrailing) {
+                backgroundColor.ignoresSafeArea()
+
+                VStack(spacing: 28) {
+                    Spacer(minLength: proxy.size.height * 0.16)
+
+                    VStack(spacing: 10) {
+                        Text("\(percent)%")
+                            .font(.system(size: 42, weight: .bold, design: .rounded))
+                            .foregroundStyle(primaryTextColor)
+                        Text(viewModel.transcriptionStatus.isEmpty ? "Transcribing audio" : viewModel.transcriptionStatus)
+                            .font(.system(size: 16, weight: .semibold, design: .rounded))
+                            .foregroundStyle(secondaryTextColor)
+                            .multilineTextAlignment(.center)
+                    }
+
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 34, style: .continuous)
+                            .fill(Brand.surface.opacity(0.72))
+                        Image(systemName: "waveform")
+                            .font(.system(size: 54, weight: .bold))
+                            .foregroundStyle(Brand.navy)
+                        RoundedRectProgressShape(progress: viewModel.transcriptionProgress, cornerRadius: 34, inset: 4)
+                            .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+                    }
+                    .frame(
+                        width: min(proxy.size.width * 0.68, 360),
+                        height: min(proxy.size.height * 0.30, 280)
+                    )
+
+                    Text("Generating a local SRT from this video's audio.")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(secondaryTextColor)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+
+                    Spacer(minLength: proxy.size.height * 0.08)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Button {
+                    viewModel.cancelTranscription()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(primaryTextColor)
+                        .frame(width: 48, height: 48)
+                        .background(Brand.surface.opacity(0.7), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 18)
+                .padding(.trailing, 18)
+            }
+        }
+    }
+}
+
+private struct SRTEditorOverlay: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var backgroundColor: Color {
+        colorScheme == .dark ? .black : Brand.softSurface
+    }
+
+    private var primaryTextColor: Color {
+        colorScheme == .dark ? .white : Brand.ink
+    }
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            backgroundColor.ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 12) {
+                    Image(systemName: "captions.bubble.fill")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(Brand.navy)
+                        .frame(width: 36, height: 36)
+                        .nativeGlassPanel(cornerRadius: 8)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Edit SRT")
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .foregroundStyle(primaryTextColor)
+                        Text(viewModel.selectedSRT?.fileName ?? "captions.srt")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+
+                TextEditor(text: $viewModel.srtDraft)
+                    .font(.system(size: 14, weight: .medium, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(12)
+                    .nativeGlassPanel(cornerRadius: 8, interactive: true)
+
+                Button {
+                    viewModel.saveSRTDraft()
+                } label: {
+                    Label("Save SRT", systemImage: "checkmark.seal.fill")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                }
+                .nativeGlassButton(prominent: true)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 82)
+            .padding(.bottom, 24)
+
+            Button {
+                viewModel.isSRTEditorPresented = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(primaryTextColor)
+                    .frame(width: 48, height: 48)
+                    .background(Brand.surface.opacity(0.7), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 18)
+            .padding(.trailing, 18)
         }
     }
 }

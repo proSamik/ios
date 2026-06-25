@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 enum MediaMetadataReader {
-    static func videoMetadata(for url: URL) async throws -> VideoMetadata {
+    nonisolated static func videoMetadata(for url: URL) async throws -> VideoMetadata {
         let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .totalFileSizeKey])
         let fileSize = Int64(resourceValues.fileSize ?? resourceValues.totalFileSize ?? 0)
         let asset = AVURLAsset(url: url)
@@ -24,9 +24,8 @@ enum MediaMetadataReader {
         )
     }
 
-    static func fileSize(for url: URL) throws -> Int64 {
+    nonisolated static func fileSize(for url: URL) throws -> Int64 {
         let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .totalFileSizeKey])
         return Int64(resourceValues.fileSize ?? resourceValues.totalFileSize ?? 0)
     }
 }
-

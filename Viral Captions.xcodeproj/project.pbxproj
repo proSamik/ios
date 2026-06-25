@@ -274,6 +274,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save rendered captioned MP4s to your photo library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Select videos from your photo library to render captioned MP4s.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Generate local SRT captions from your selected video's audio.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -330,6 +331,7 @@
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save rendered captioned MP4s to your photo library.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Select videos from your photo library to render captioned MP4s.";
+				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Generate local SRT captions from your selected video's audio.";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
