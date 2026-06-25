@@ -112,7 +112,23 @@ final class ViralCaptionsViewModel: ObservableObject {
     }
 
     var effectiveFaceTrack: Bool {
-        faceTrack && faceTrackApplies
+        faceTrack && (placement == .none || faceTrackApplies)
+    }
+
+    func selectPlacement(_ nextPlacement: CaptionPlacement) {
+        placement = nextPlacement
+        if nextPlacement == .none {
+            faceTrack = true
+        }
+    }
+
+    func setFaceTrack(_ isEnabled: Bool) {
+        faceTrack = isEnabled
+        if isEnabled {
+            placement = .none
+        } else if placement == .none {
+            placement = .bottom
+        }
     }
 
     func saveAPIKey() {
@@ -355,7 +371,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                     language: selectedLanguage,
                     templateId: selectedTemplateId,
                     aspectRatio: aspectRatio.rawValue,
-                    placement: placement.rawValue,
+                    placement: placement.apiValue,
                     faceTrack: effectiveFaceTrack ? true : nil,
                     outputFileName: normalizedOutputFileName()
                 )

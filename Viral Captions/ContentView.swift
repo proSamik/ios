@@ -1046,27 +1046,28 @@ private struct AspectRatioControl: View {
 }
 
 private struct PlacementControl: View {
-    @Binding var selection: CaptionPlacement
+    @ObservedObject var viewModel: ViralCaptionsViewModel
 
     var body: some View {
         LiquidGlassGroup(spacing: 8) {
-            HStack(spacing: 8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], spacing: 8) {
                 ForEach(CaptionPlacement.allCases) { placement in
                     OptionChip(
                         title: placement.label,
                         systemImage: icon(for: placement),
-                        selected: placement == selection
+                        selected: placement == viewModel.placement
                     ) {
-                        selection = placement
+                        viewModel.selectPlacement(placement)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private func icon(for placement: CaptionPlacement) -> String {
         switch placement {
+        case .none:
+            return "location.slash"
         case .top:
             return "align.vertical.top.fill"
         case .middle:
@@ -1172,21 +1173,21 @@ private struct CoreRenderOptionsCard: View {
                             Text("Placement")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(Brand.slate)
-                            PlacementControl(selection: $viewModel.placement)
+                            PlacementControl(viewModel: viewModel)
                         }
 
                         Toggle(
                             isOn: Binding(
-                                get: { viewModel.faceTrackApplies && viewModel.faceTrack },
-                                set: { viewModel.faceTrack = $0 }
+                                get: { viewModel.placement == .none || (viewModel.faceTrackApplies && viewModel.faceTrack) },
+                                set: { viewModel.setFaceTrack($0) }
                             )
                         ) {
                             Label("Face tracking", systemImage: "face.smiling")
                                 .font(.system(size: 14, weight: .semibold))
                                 .foregroundStyle(Brand.ink)
                         }
-                        .disabled(!viewModel.faceTrackApplies)
-                        .opacity(viewModel.faceTrackApplies ? 1 : 0.55)
+                        .disabled(!viewModel.faceTrackApplies && viewModel.placement != .none)
+                        .opacity((viewModel.faceTrackApplies || viewModel.placement == .none) ? 1 : 0.55)
 
                         VStack(alignment: .leading, spacing: 7) {
                             Text("Advanced")
@@ -1219,6 +1220,8 @@ private struct CoreRenderOptionsCard: View {
 
     private var placementIcon: String {
         switch viewModel.placement {
+        case .none:
+            return "location.slash"
         case .top:
             return "align.vertical.top.fill"
         case .middle:
@@ -1492,7 +1495,8 @@ private struct RenderProgressOverlay: View {
 
                     RenderProgressPreview(
                         url: viewModel.selectedVideo?.url,
-                        progress: viewModel.progress
+                        progress: viewModel.progress,
+                        autoplay: false
                     )
                     .frame(
                         width: min(proxy.size.width * 0.68, 360),
@@ -1529,6 +1533,7 @@ private struct RenderProgressOverlay: View {
 private struct RenderProgressPreview: View {
     let url: URL?
     let progress: Double
+    var autoplay = false
     @State private var player: AVPlayer?
 
     var body: some View {
@@ -1546,8 +1551,10 @@ private struct RenderProgressPreview: View {
                     .padding(18)
             }
 
-            RectangleProgressBorder(progress: progress)
+            RoundedRectangle(cornerRadius: 34, style: .continuous)
+                .trim(from: 0, to: CGFloat(max(0.001, min(1, progress))))
                 .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
+                .rotationEffect(.degrees(-90))
         }
         .onAppear {
             configurePlayer()
@@ -1580,47 +1587,10 @@ private struct RenderProgressPreview: View {
         let nextPlayer = AVPlayer(url: url)
         nextPlayer.isMuted = true
         nextPlayer.actionAtItemEnd = .none
-        nextPlayer.play()
-        player = nextPlayer
-    }
-}
-
-private struct RectangleProgressBorder: Shape {
-    let progress: Double
-
-    func path(in rect: CGRect) -> Path {
-        let progress = CGFloat(max(0, min(1, progress)))
-        let insetRect = rect.insetBy(dx: 4, dy: 4)
-        let width = insetRect.width
-        let height = insetRect.height
-        let perimeter = max(1, (width + height) * 2)
-        var remaining = perimeter * progress
-        var path = Path()
-
-        func consume(_ length: CGFloat) -> CGFloat {
-            let used = min(remaining, length)
-            remaining -= used
-            return used
+        if autoplay {
+            nextPlayer.play()
         }
-
-        path.move(to: CGPoint(x: insetRect.minX, y: insetRect.minY))
-
-        let top = consume(width)
-        path.addLine(to: CGPoint(x: insetRect.minX + top, y: insetRect.minY))
-        guard remaining > 0 else { return path }
-
-        let right = consume(height)
-        path.addLine(to: CGPoint(x: insetRect.maxX, y: insetRect.minY + right))
-        guard remaining > 0 else { return path }
-
-        let bottom = consume(width)
-        path.addLine(to: CGPoint(x: insetRect.maxX - bottom, y: insetRect.maxY))
-        guard remaining > 0 else { return path }
-
-        let left = consume(height)
-        path.addLine(to: CGPoint(x: insetRect.minX, y: insetRect.maxY - left))
-
-        return path
+        player = nextPlayer
     }
 }
 
@@ -1647,32 +1617,23 @@ private struct OutputReadyOverlay: View {
             ZStack(alignment: .topTrailing) {
                 backgroundColor.ignoresSafeArea()
 
-                VStack(spacing: 28) {
-                    Spacer(minLength: proxy.size.height * 0.08)
+                ScrollView {
+                    VStack(spacing: 24) {
+                        if let previewURL = viewModel.resultPreviewURL {
+                            RenderProgressPreview(url: previewURL, progress: 1, autoplay: true)
+                                .frame(
+                                    width: min(proxy.size.width * 0.68, 360),
+                                    height: min(proxy.size.height * 0.48, 560)
+                                )
 
-                    VStack(spacing: 10) {
-                        Text("100%")
-                            .font(.system(size: 42, weight: .bold, design: .rounded))
-                            .foregroundStyle(primaryTextColor)
-                        Text("Ready to share")
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundStyle(secondaryTextColor)
+                            ShareDestinationGrid(viewModel: viewModel, onSaveOutput: onDownload)
+                                .padding(.horizontal, 24)
+                        }
                     }
-
-                    if let previewURL = viewModel.resultPreviewURL {
-                        RenderProgressPreview(url: previewURL, progress: 1)
-                            .frame(
-                                width: min(proxy.size.width * 0.68, 360),
-                                height: min(proxy.size.height * 0.58, 640)
-                            )
-
-                        ShareDestinationGrid(outputURL: previewURL, onSaveOutput: onDownload)
-                            .padding(.horizontal, 24)
-                    }
-
-                    Spacer(minLength: proxy.size.height * 0.04)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 92)
+                    .padding(.bottom, 36)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                 Button(action: onClose) {
                     Image(systemName: "xmark")
@@ -1709,7 +1670,7 @@ private struct ResultCard: View {
                         .frame(maxWidth: viewModel.aspectRatio.previewMaxWidth)
                         .frame(maxWidth: .infinity)
 
-                    ShareDestinationGrid(outputURL: previewURL, onSaveOutput: onSaveOutput)
+                    ShareDestinationGrid(viewModel: viewModel, onSaveOutput: onSaveOutput)
                 }
             }
         }
@@ -1717,35 +1678,56 @@ private struct ResultCard: View {
 }
 
 private struct ShareDestinationGrid: View {
-    let outputURL: URL
+    @ObservedObject var viewModel: ViralCaptionsViewModel
     var onSaveOutput: () -> Void
+    @State private var isPreparingShare = false
+    @State private var shareItem: ShareSheetItem?
 
     private let columns = [
-        GridItem(.adaptive(minimum: 82), spacing: 12)
+        GridItem(.flexible(), spacing: 14),
+        GridItem(.flexible(), spacing: 14)
     ]
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 12) {
-            #if os(iOS)
-            ForEach(ShareDestination.primaryDestinations) { destination in
-                Button {
-                    destination.open()
-                } label: {
-                    ShareDestinationTile(title: destination.title, systemImage: destination.systemImage)
-                }
-                .buttonStyle(.plain)
-            }
-            #endif
-
             Button(action: onSaveOutput) {
                 ShareDestinationTile(title: "Download", systemImage: "arrow.down.to.line")
             }
             .buttonStyle(.plain)
 
-            ShareLink(item: outputURL) {
-                ShareDestinationTile(title: "More", systemImage: "square.and.arrow.up")
+            Button {
+                prepareShare()
+            } label: {
+                ShareDestinationTile(
+                    title: isPreparingShare ? "Preparing" : "Share",
+                    systemImage: "square.and.arrow.up",
+                    isLoading: isPreparingShare
+                )
             }
             .buttonStyle(.plain)
+            .disabled(isPreparingShare)
+        }
+        #if os(iOS)
+        .sheet(item: $shareItem) { item in
+            ActivityShareSheet(items: [item.url])
+        }
+        #endif
+    }
+
+    private func prepareShare() {
+        guard !isPreparingShare else { return }
+        isPreparingShare = true
+        Task {
+            let outputURL = await viewModel.downloadCurrentOutput()
+            await MainActor.run {
+                isPreparingShare = false
+                guard let outputURL else { return }
+                #if os(iOS)
+                shareItem = ShareSheetItem(url: outputURL)
+                #else
+                viewModel.alert = AppMessage(title: "MP4 ready", message: outputURL.path)
+                #endif
+            }
         }
     }
 }
@@ -1753,14 +1735,22 @@ private struct ShareDestinationGrid: View {
 private struct ShareDestinationTile: View {
     let title: String
     let systemImage: String
+    var isLoading = false
 
     var body: some View {
         VStack(spacing: 9) {
-            Image(systemName: systemImage)
-                .font(.system(size: 24, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 66, height: 66)
-                .background(Color(hex: 0x20242B), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            ZStack {
+                if isLoading {
+                    ProgressView()
+                        .tint(.white)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: 66, height: 66)
+            .background(Color(hex: 0x20242B), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             Text(title)
                 .font(.system(size: 12, weight: .bold, design: .rounded))
@@ -1772,50 +1762,20 @@ private struct ShareDestinationTile: View {
     }
 }
 
+private struct ShareSheetItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
 #if os(iOS)
-private struct ShareDestination: Identifiable {
-    let id: String
-    let title: String
-    let systemImage: String
-    let appURL: URL
-    let fallbackURL: URL
+private struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
 
-    static let primaryDestinations: [ShareDestination] = [
-        ShareDestination(
-            id: "instagram",
-            title: "Instagram",
-            systemImage: "camera.fill",
-            appURL: URL(string: "instagram://app")!,
-            fallbackURL: URL(string: "https://www.instagram.com/")!
-        ),
-        ShareDestination(
-            id: "youtube",
-            title: "YouTube",
-            systemImage: "play.rectangle.fill",
-            appURL: URL(string: "youtube://")!,
-            fallbackURL: URL(string: "https://www.youtube.com/upload")!
-        ),
-        ShareDestination(
-            id: "tiktok",
-            title: "TikTok",
-            systemImage: "music.note",
-            appURL: URL(string: "tiktok://")!,
-            fallbackURL: URL(string: "https://www.tiktok.com/upload")!
-        ),
-        ShareDestination(
-            id: "x",
-            title: "X",
-            systemImage: "xmark",
-            appURL: URL(string: "twitter://")!,
-            fallbackURL: URL(string: "https://x.com/compose/post")!
-        )
-    ]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
 
-    func open() {
-        UIApplication.shared.open(appURL, options: [:]) { success in
-            guard !success else { return }
-            UIApplication.shared.open(fallbackURL)
-        }
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
     }
 }
 #endif

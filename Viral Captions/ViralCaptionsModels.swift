@@ -214,6 +214,7 @@ enum OutputAspectRatio: String, CaseIterable, Identifiable {
 }
 
 enum CaptionPlacement: String, CaseIterable, Identifiable {
+    case none
     case top
     case middle
     case bottom
@@ -221,7 +222,12 @@ enum CaptionPlacement: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 
     var label: String {
-        rawValue.prefix(1).uppercased() + rawValue.dropFirst()
+        guard self != .none else { return "None" }
+        return rawValue.prefix(1).uppercased() + rawValue.dropFirst()
+    }
+
+    var apiValue: String? {
+        self == .none ? nil : rawValue
     }
 }
 
