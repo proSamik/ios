@@ -79,6 +79,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var isCheckingQuota = false
     @Published var quotaInfo: QuotaResponse?
     @Published var apiKeyValidated: Bool
+    @Published var isOutputCaching = false
 
     private let client = SubclipAPIClient()
     private var pollTask: Task<Void, Never>?
@@ -569,6 +570,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                 creditsUsed: completeStatus.creditsUsed,
                 downloadExpiresAt: outputDownloadExpiresAt
             )
+            cacheCurrentOutput()
         } catch is CancellationError {
             phase = .idle
             statusMessage = "Render canceled."
@@ -610,7 +612,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     func cacheCurrentOutput() {
         guard outputURL == nil, outputRemoteURL != nil, outputCacheTask == nil else { return }
         outputCacheTask = Task { @MainActor [weak self] in
-            await self?.downloadCurrentOutput(showAlertOnFailure: false)
+            await self?.downloadCurrentOutput(showAlertOnFailure: false, updatesStatus: false)
         }
     }
 
@@ -627,10 +629,10 @@ final class ViralCaptionsViewModel: ObservableObject {
             }
         }
 
-        return await downloadCurrentOutput(showAlertOnFailure: true)
+        return await downloadCurrentOutput(showAlertOnFailure: true, updatesStatus: true)
     }
 
-    private func downloadCurrentOutput(showAlertOnFailure: Bool) async -> URL? {
+    private func downloadCurrentOutput(showAlertOnFailure: Bool, updatesStatus: Bool) async -> URL? {
         if let outputURL {
             return outputURL
         }
@@ -642,20 +644,30 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
 
         do {
-            phase = .downloading
-            statusMessage = "Downloading final MP4..."
+            if updatesStatus {
+                phase = .downloading
+                statusMessage = "Downloading final MP4..."
+            } else {
+                isOutputCaching = true
+            }
             let localURL = try await client.downloadFile(
                 from: outputRemoteURL,
                 suggestedFileName: outputSuggestedFileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
             )
             outputURL = localURL
             outputCacheTask = nil
-            phase = .completed
-            statusMessage = "Downloaded."
+            isOutputCaching = false
+            if updatesStatus {
+                phase = .completed
+                statusMessage = "Downloaded."
+            }
             return localURL
         } catch {
             outputCacheTask = nil
-            phase = .completed
+            isOutputCaching = false
+            if updatesStatus {
+                phase = .completed
+            }
             if showAlertOnFailure {
                 alert = AppMessage(title: "Could not download MP4", message: error.localizedDescription)
             }
@@ -704,6 +716,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                 creditsUsed: item.creditsUsed,
                 downloadExpiresAt: outputDownloadExpiresAt
             )
+            cacheCurrentOutput()
             return true
         } catch {
             alert = AppMessage(title: "Could not open history item", message: error.localizedDescription)

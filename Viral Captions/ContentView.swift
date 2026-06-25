@@ -2143,6 +2143,7 @@ private struct RenderProgressPreview: View {
     var autoplay = false
     var showsProgressBorder = true
     @State private var player: AVPlayer?
+    @State private var playbackKickTask: Task<Void, Never>?
 
     private var clampedProgress: Double {
         min(1, max(0, progress))
@@ -2178,6 +2179,8 @@ private struct RenderProgressPreview: View {
             configurePlayer()
         }
         .onDisappear {
+            playbackKickTask?.cancel()
+            playbackKickTask = nil
             player?.pause()
             player?.replaceCurrentItem(with: nil)
             player = nil
@@ -2187,25 +2190,55 @@ private struct RenderProgressPreview: View {
                   notification.object as? AVPlayerItem === currentItem else {
                 return
             }
-            currentItem.seek(to: .zero, completionHandler: nil)
-            player?.play()
+            currentItem.seek(to: .zero) { _ in
+                Task { @MainActor in
+                    if autoplay {
+                        player?.play()
+                    }
+                }
+            }
         }
     }
 
     private func configurePlayer() {
+        playbackKickTask?.cancel()
+        playbackKickTask = nil
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         guard let url else {
             player = nil
             return
         }
-        let nextPlayer = AVPlayer(url: url)
+        let item = AVPlayerItem(url: url)
+        let nextPlayer = AVPlayer(playerItem: item)
         nextPlayer.isMuted = true
         nextPlayer.actionAtItemEnd = .none
-        if autoplay {
-            nextPlayer.play()
-        }
+        nextPlayer.automaticallyWaitsToMinimizeStalling = true
         player = nextPlayer
+        if autoplay {
+            startAutoplay(for: nextPlayer)
+        }
+    }
+
+    private func startAutoplay(for activePlayer: AVPlayer) {
+        playbackKickTask = Task { @MainActor in
+            let delays: [UInt64] = [
+                0,
+                120_000_000,
+                350_000_000,
+                800_000_000,
+                1_500_000_000
+            ]
+
+            for delay in delays {
+                if delay > 0 {
+                    try? await Task.sleep(nanoseconds: delay)
+                }
+                guard !Task.isCancelled, player === activePlayer else { return }
+                guard activePlayer.currentItem?.status != .failed else { return }
+                activePlayer.play()
+            }
+        }
     }
 }
 
@@ -2453,7 +2486,17 @@ private struct ShareDestinationGrid: View {
 
     private func prepareShare() {
         guard !isPreparingShare else { return }
+        if let outputURL = viewModel.outputURL {
+            #if os(iOS)
+            shareItem = ShareSheetItem(url: outputURL, title: viewModel.outputSuggestedFileName ?? outputURL.lastPathComponent)
+            #else
+            viewModel.alert = AppMessage(title: "MP4 ready", message: outputURL.path)
+            #endif
+            return
+        }
+
         isPreparingShare = true
+        viewModel.cacheCurrentOutput()
         Task {
             let outputURL = await viewModel.downloadCurrentOutput()
             await MainActor.run {
