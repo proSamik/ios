@@ -283,6 +283,53 @@ struct AppMessage: Identifiable, Equatable {
     let message: String
 }
 
+struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
+    let id: UUID
+    let projectId: String
+    let fileName: String
+    let templateId: String
+    let aspectRatio: String
+    let createdAt: Date
+    var status: String
+    var outputFileName: String?
+
+    init(
+        id: UUID = UUID(),
+        projectId: String,
+        fileName: String,
+        templateId: String,
+        aspectRatio: String,
+        createdAt: Date = Date(),
+        status: String,
+        outputFileName: String? = nil
+    ) {
+        self.id = id
+        self.projectId = projectId
+        self.fileName = fileName
+        self.templateId = templateId
+        self.aspectRatio = aspectRatio
+        self.createdAt = createdAt
+        self.status = status
+        self.outputFileName = outputFileName
+    }
+}
+
+enum LocalUploadQueueStore {
+    private static let key = "localUploadQueue"
+    private static let limit = 20
+
+    static func load() -> [LocalUploadQueueItem] {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
+        return (try? JSONDecoder().decode([LocalUploadQueueItem].self, from: data)) ?? []
+    }
+
+    static func save(_ items: [LocalUploadQueueItem]) {
+        let trimmed = Array(items.prefix(limit))
+        guard let data = try? JSONEncoder().encode(trimmed) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
 extension UTType {
     static var srt: UTType {
         UTType(filenameExtension: "srt") ?? .plainText

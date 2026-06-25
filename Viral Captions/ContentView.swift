@@ -78,19 +78,6 @@ struct ContentView: View {
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
-                .toolbar {
-                    ToolbarItemGroup(placement: .primaryAction) {
-                        Button(action: pickVideo) {
-                            Label("Choose video", systemImage: "plus")
-                        }
-                        .nativeGlassButton()
-
-                        Button(action: pickSRT) {
-                            Label("SRT", systemImage: "text.badge.plus")
-                        }
-                        .nativeGlassButton()
-                    }
-                }
             }
             .tabItem {
                 Label("Create", systemImage: "wand.and.stars")
@@ -359,8 +346,6 @@ private struct CreateWorkspace: View {
         GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 20) {
-                    HeaderView()
-
                     if proxy.size.width >= 940 {
                         HStack(alignment: .top, spacing: 18) {
                             VStack(spacing: 18) {
@@ -374,8 +359,10 @@ private struct CreateWorkspace: View {
                             .frame(maxWidth: 500)
 
                             VStack(spacing: 18) {
-                                CoreRenderOptionsCard(viewModel: viewModel)
-                                RenderCard(viewModel: viewModel)
+                                if viewModel.selectedVideo != nil {
+                                    CoreRenderOptionsCard(viewModel: viewModel)
+                                    RenderCard(viewModel: viewModel)
+                                }
                                 if viewModel.outputURL != nil {
                                     ResultCard(viewModel: viewModel, onSaveOutput: onSaveOutput)
                                 }
@@ -390,8 +377,10 @@ private struct CreateWorkspace: View {
                                 onPickSRT: onPickSRT
                             )
                             TemplateCard(viewModel: viewModel)
-                            CoreRenderOptionsCard(viewModel: viewModel)
-                            RenderCard(viewModel: viewModel)
+                            if viewModel.selectedVideo != nil {
+                                CoreRenderOptionsCard(viewModel: viewModel)
+                                RenderCard(viewModel: viewModel)
+                            }
                             if viewModel.outputURL != nil {
                                 ResultCard(viewModel: viewModel, onSaveOutput: onSaveOutput)
                             }
@@ -416,8 +405,6 @@ private struct SettingsWorkspace: View {
         GeometryReader { proxy in
             ScrollView {
                 VStack(spacing: 20) {
-                    HeaderView()
-
                     if proxy.size.width >= 940 {
                         HStack(alignment: .top, spacing: 18) {
                             VStack(spacing: 18) {
@@ -428,6 +415,7 @@ private struct SettingsWorkspace: View {
 
                             VStack(spacing: 18) {
                                 AdvancedSettingsCard(viewModel: viewModel)
+                                LocalQueueCard(viewModel: viewModel)
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -436,6 +424,7 @@ private struct SettingsWorkspace: View {
                             APIKeyCard(viewModel: viewModel)
                             ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
                             AdvancedSettingsCard(viewModel: viewModel)
+                            LocalQueueCard(viewModel: viewModel)
                         }
                     }
                 }
@@ -548,6 +537,12 @@ private struct APIKeyCard: View {
                     }
                 }
 
+                Link(destination: URL(string: "https://subclip.app/account/api")!) {
+                    Label("Get API key from Subclip", systemImage: "key.viewfinder")
+                        .frame(maxWidth: .infinity)
+                }
+                .nativeGlassButton()
+
                 HStack(spacing: 8) {
                     Image(systemName: "lock.fill")
                         .foregroundStyle(Brand.navy)
@@ -571,8 +566,13 @@ private struct MediaCard: View {
             VStack(alignment: .leading, spacing: 16) {
                 CardHeader(title: "Media", systemImage: "film.fill")
 
-                VideoPreview(url: viewModel.selectedVideo?.url)
-                    .frame(height: viewModel.selectedVideo == nil ? 180 : 260)
+                ZStack {
+                    VideoPreview(url: viewModel.selectedVideo?.url)
+                    if viewModel.isImportingVideo {
+                        VideoImportOverlay()
+                    }
+                }
+                .frame(height: viewModel.selectedVideo == nil ? 180 : 260)
 
                 if let video = viewModel.selectedVideo {
                     VStack(spacing: 8) {
@@ -588,10 +588,11 @@ private struct MediaCard: View {
                 LiquidGlassGroup(spacing: 10) {
                     HStack(spacing: 10) {
                         Button(action: onPickVideo) {
-                            Label(viewModel.selectedVideo == nil ? "Choose video" : "Replace video", systemImage: "plus")
+                            Label(videoButtonTitle, systemImage: "plus")
                                 .frame(maxWidth: .infinity)
                         }
                         .nativeGlassButton()
+                        .disabled(viewModel.isImportingVideo)
 
                         Button(action: onPickSRT) {
                             Label("SRT", systemImage: "text.badge.plus")
@@ -626,6 +627,28 @@ private struct MediaCard: View {
             }
         }
     }
+
+    private var videoButtonTitle: String {
+        if viewModel.isImportingVideo { return "Loading video" }
+        return viewModel.selectedVideo == nil ? "Choose video" : "Replace video"
+    }
+}
+
+private struct VideoImportOverlay: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView()
+                .controlSize(.regular)
+            Text("Loading video")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(Brand.ink)
+            ProgressView(value: 0.62)
+                .progressViewStyle(.linear)
+                .frame(maxWidth: 180)
+        }
+        .padding(18)
+        .nativeGlassPanel(cornerRadius: 8)
+    }
 }
 
 private struct TemplateCard: View {
@@ -638,7 +661,7 @@ private struct TemplateCard: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     LiquidGlassGroup(spacing: 10) {
-                        HStack(spacing: 10) {
+                        LazyHStack(spacing: 10) {
                             ForEach(CaptionTemplate.all) { template in
                                 TemplateButton(
                                     template: template,
@@ -1085,23 +1108,79 @@ private struct AdvancedSettingsCard: View {
             VStack(alignment: .leading, spacing: 16) {
                 CardHeader(title: "Defaults", systemImage: "slider.horizontal.below.rectangle")
 
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Output File")
-                        .font(.system(size: 13, weight: .semibold))
+                Label("Rendered videos are saved as Captioned-[source name].mp4.", systemImage: "doc.badge.gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Brand.slate)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+private struct LocalQueueCard: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+
+    var body: some View {
+        BrandCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 10) {
+                    CardHeader(title: "Local Queue", systemImage: "tray.full.fill")
+                    if !viewModel.uploadQueue.isEmpty {
+                        Button {
+                            viewModel.clearUploadQueue()
+                        } label: {
+                            Image(systemName: "trash")
+                                .frame(width: 32, height: 32)
+                        }
+                        .nativeGlassButton()
+                        .accessibilityLabel("Clear local queue")
+                    }
+                }
+
+                if viewModel.uploadQueue.isEmpty {
+                    Text("Uploaded videos will appear here after a render starts.")
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Brand.slate)
-                    TextField(
-                        "Output file name",
-                        text: $viewModel.outputFileName,
-                        prompt: Text("captioned-video.mp4").foregroundColor(.secondary)
-                    )
-                        .brandedInputField()
-                        #if os(iOS)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        #endif
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(viewModel.uploadQueue) { item in
+                            LocalQueueRow(item: item)
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+private struct LocalQueueRow: View {
+    let item: LocalUploadQueueItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "video.fill")
+                    .foregroundStyle(Brand.navy)
+                Text(item.fileName)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Brand.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(item.status)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                MetricPill(text: item.aspectRatio, systemImage: "rectangle.on.rectangle")
+                MetricPill(text: item.templateId, systemImage: "sparkles")
+                if let outputFileName = item.outputFileName {
+                    MetricPill(text: outputFileName, systemImage: "square.and.arrow.down")
+                }
+            }
+        }
+        .padding(10)
+        .nativeGlassPanel(cornerRadius: 8)
     }
 }
 
@@ -1141,6 +1220,9 @@ private struct ThemeSettingsCard: View {
 
 private struct RenderCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    private var renderLabelOpacity: Double {
+        viewModel.canRender ? 1 : 0.45
+    }
 
     var body: some View {
         BrandCard {
@@ -1159,9 +1241,11 @@ private struct RenderCard: View {
                         }
                         Text(viewModel.isRendering ? viewModel.phase.label : "Render video")
                     }
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(Brand.navy.opacity(renderLabelOpacity))
                     .frame(maxWidth: .infinity)
                 }
-                .nativeGlassButton(prominent: true)
+                .nativeGlassButton()
                 .disabled(!viewModel.canRender)
 
                 if viewModel.phase != .idle || viewModel.projectId != nil {

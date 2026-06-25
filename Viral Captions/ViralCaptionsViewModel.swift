@@ -44,6 +44,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var apiKey: String
     @Published var selectedVideo: SelectedVideo?
     @Published var selectedSRT: SelectedSRT?
+    @Published var isImportingVideo = false
     @Published var selectedTemplateId = "bold-clean"
     @Published var selectedLanguage = "auto"
     @Published var aspectRatio: OutputAspectRatio = .vertical
@@ -61,6 +62,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var outputURL: URL?
     @Published var outputFileSize: Int64?
     @Published var alert: AppMessage?
+    @Published var uploadQueue: [LocalUploadQueueItem]
 
     private let client = SubclipAPIClient()
     private var pollTask: Task<Void, Never>?
@@ -68,6 +70,7 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     init() {
         self.apiKey = KeychainStore.readAPIKey()
+        self.uploadQueue = LocalUploadQueueStore.load()
     }
 
     var isRendering: Bool {
@@ -160,9 +163,15 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
     }
 
+    func clearUploadQueue() {
+        uploadQueue.removeAll()
+        LocalUploadQueueStore.save(uploadQueue)
+    }
+
     private func setVideo(from url: URL) async {
         releaseVideoScope()
         resetResult()
+        isImportingVideo = true
         phase = .readingMedia
         statusMessage = "Reading video metadata..."
 
@@ -190,6 +199,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             phase = .idle
             statusMessage = "Ready to render."
             progress = 0
+            isImportingVideo = false
         } catch {
             if scopeActive {
                 url.stopAccessingSecurityScopedResource()
@@ -200,6 +210,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             selectedVideo = nil
             phase = .failed
             statusMessage = "Could not read that video."
+            isImportingVideo = false
             alert = AppMessage(title: "Video import failed", message: error.localizedDescription)
         }
     }
@@ -236,6 +247,9 @@ final class ViralCaptionsViewModel: ObservableObject {
             outputFileSize = nil
             latestStatus = nil
             creditsUsed = nil
+            projectId = nil
+            runId = nil
+            estimatedCredits = nil
             phase = .creatingUpload
             progress = 0.08
             statusMessage = "Creating secure upload URLs..."
@@ -258,10 +272,16 @@ final class ViralCaptionsViewModel: ObservableObject {
 
             let upload = try await client.createUpload(apiKey: trimmedKey, payload: uploadPayload)
             projectId = upload.projectId
+            addQueueItem(
+                projectId: upload.projectId,
+                fileName: selectedVideo.fileName,
+                status: "Upload created"
+            )
 
             phase = .uploadingVideo
             progress = 0.18
             statusMessage = "Uploading \(selectedVideo.fileName)..."
+            updateQueueItem(projectId: upload.projectId, status: "Uploading")
             try await client.uploadFile(
                 fileURL: selectedVideo.url,
                 uploadURL: upload.video.uploadUrl,
@@ -284,6 +304,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             phase = .startingJob
             progress = 0.34
             statusMessage = "Starting Subclip render..."
+            updateQueueItem(projectId: upload.projectId, status: "Starting render")
             let start = try await client.startJob(
                 apiKey: trimmedKey,
                 payload: StartJobRequest(
@@ -298,6 +319,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             )
             runId = start.runId
             estimatedCredits = start.estimatedCredits
+            updateQueueItem(projectId: upload.projectId, status: "Rendering")
 
             let completeStatus = try await pollUntilReady(apiKey: trimmedKey, projectId: upload.projectId)
             creditsUsed = completeStatus.creditsUsed
@@ -316,12 +338,23 @@ final class ViralCaptionsViewModel: ObservableObject {
             phase = .completed
             progress = 1
             statusMessage = "Render complete."
+            updateQueueItem(
+                projectId: upload.projectId,
+                status: "Completed",
+                outputFileName: localURL.lastPathComponent
+            )
         } catch is CancellationError {
             phase = .idle
             statusMessage = "Render canceled."
+            if let projectId {
+                updateQueueItem(projectId: projectId, status: "Canceled")
+            }
         } catch {
             phase = .failed
             statusMessage = "Render failed."
+            if let projectId {
+                updateQueueItem(projectId: projectId, status: "Failed")
+            }
             alert = AppMessage(title: "Render failed", message: error.localizedDescription)
         }
     }
@@ -399,13 +432,38 @@ final class ViralCaptionsViewModel: ObservableObject {
             with: "",
             options: .regularExpression
         )
-        return "\(base)-captions.mp4"
+        return "Captioned-\(base).mp4"
     }
 
     private func normalizedOutputFileName() -> String? {
         let cleaned = sanitizedFileName(outputFileName, fallback: "captioned-video.mp4")
         guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return cleaned.lowercased().hasSuffix(".mp4") ? cleaned : "\(cleaned).mp4"
+    }
+
+    private func addQueueItem(projectId: String, fileName: String, status: String) {
+        uploadQueue.removeAll { $0.projectId == projectId }
+        uploadQueue.insert(
+            LocalUploadQueueItem(
+                projectId: projectId,
+                fileName: fileName,
+                templateId: selectedTemplateId,
+                aspectRatio: aspectRatio.rawValue,
+                status: status,
+                outputFileName: normalizedOutputFileName()
+            ),
+            at: 0
+        )
+        LocalUploadQueueStore.save(uploadQueue)
+    }
+
+    private func updateQueueItem(projectId: String, status: String, outputFileName: String? = nil) {
+        guard let index = uploadQueue.firstIndex(where: { $0.projectId == projectId }) else { return }
+        uploadQueue[index].status = status
+        if let outputFileName {
+            uploadQueue[index].outputFileName = outputFileName
+        }
+        LocalUploadQueueStore.save(uploadQueue)
     }
 
     private func releaseVideoScope() {
