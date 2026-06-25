@@ -49,7 +49,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var selectedTemplateId = "bold-clean"
     @Published var selectedLanguage = "auto"
     @Published var aspectRatio: OutputAspectRatio = .vertical
-    @Published var placement: CaptionPlacement = .bottom
+    @Published var placement: CaptionPlacement = .none
     @Published var faceTrack = true
     @Published var outputFileName = ""
     @Published var phase: RenderPhase = .idle

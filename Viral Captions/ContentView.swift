@@ -1188,30 +1188,29 @@ private struct OptionChip: View {
     var body: some View {
         Button(action: action) {
             ZStack {
+                Capsule()
+                    .fill(baseFill)
+
                 if selected {
                     Capsule()
                         .fill(selectedFill)
                         .matchedGeometryEffect(id: selectionID, in: selectionNamespace)
-                        .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 12, x: 0, y: 5)
+                        .shadow(color: .black.opacity(colorScheme == .dark ? 0.26 : 0.13), radius: 12, x: 0, y: 5)
                 }
 
                 chipLabel
                     .foregroundStyle(selected ? .primary : .secondary)
             }
+            .clipShape(Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(selected ? Brand.navy.opacity(0.34) : .white.opacity(colorScheme == .dark ? 0.08 : 0.72), lineWidth: selected ? 1.35 : 1)
+            }
         }
         .buttonStyle(.plain)
-        .background {
-            Capsule()
-                .fill(baseFill)
-        }
-        .clipShape(Capsule())
-        .nativeGlassCapsule(interactive: true)
-        .overlay {
-            Capsule()
-                .stroke(selected ? Brand.navy.opacity(0.32) : .white.opacity(colorScheme == .dark ? 0.08 : 0.72), lineWidth: selected ? 1.35 : 1)
-        }
+        .contentShape(Capsule())
         .frame(minWidth: 86, maxWidth: .infinity)
-        .zIndex(selected ? 1 : 0)
+        .zIndex(selected ? 10 : 0)
     }
 
     private var chipLabel: some View {
