@@ -79,9 +79,9 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     var isRendering: Bool {
         switch phase {
-        case .creatingUpload, .uploadingVideo, .uploadingSRT, .startingJob, .polling, .downloading:
+        case .creatingUpload, .uploadingVideo, .uploadingSRT, .startingJob, .polling:
             return true
-        case .idle, .readingMedia, .completed, .failed:
+        case .idle, .readingMedia, .downloading, .completed, .failed:
             return false
         }
     }

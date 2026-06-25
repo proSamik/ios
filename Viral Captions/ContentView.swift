@@ -1536,10 +1536,14 @@ private struct RenderProgressPreview: View {
     var autoplay = false
     @State private var player: AVPlayer?
 
+    private var clampedProgress: Double {
+        min(1, max(0, progress))
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .stroke(Brand.line, lineWidth: 8)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 8)
 
             if let player {
                 PlayerLayerView(player: player, videoGravity: .resizeAspectFill)
@@ -1551,10 +1555,9 @@ private struct RenderProgressPreview: View {
                     .padding(18)
             }
 
-            RoundedRectangle(cornerRadius: 34, style: .continuous)
-                .trim(from: 0, to: CGFloat(max(0.001, min(1, progress))))
+            RoundedRectProgressShape(progress: clampedProgress, cornerRadius: 34, inset: 4)
                 .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
-                .rotationEffect(.degrees(-90))
+                .animation(.easeInOut(duration: 0.25), value: clampedProgress)
         }
         .onAppear {
             configurePlayer()
@@ -1591,6 +1594,74 @@ private struct RenderProgressPreview: View {
             nextPlayer.play()
         }
         player = nextPlayer
+    }
+}
+
+private struct RoundedRectProgressShape: Shape {
+    var progress: Double
+    var cornerRadius: CGFloat
+    var inset: CGFloat
+
+    var animatableData: Double {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let clamped = min(1, max(0, progress))
+        guard clamped > 0, rect.width > 0, rect.height > 0 else {
+            return Path()
+        }
+
+        let drawingRect = rect.insetBy(dx: inset, dy: inset)
+        guard drawingRect.width > 0, drawingRect.height > 0 else {
+            return Path()
+        }
+
+        let radius = min(max(0, cornerRadius - inset), min(drawingRect.width, drawingRect.height) / 2)
+        let minX = drawingRect.minX
+        let midX = drawingRect.midX
+        let maxX = drawingRect.maxX
+        let minY = drawingRect.minY
+        let maxY = drawingRect.maxY
+
+        var outline = Path()
+        outline.move(to: CGPoint(x: midX, y: minY))
+        outline.addLine(to: CGPoint(x: maxX - radius, y: minY))
+        outline.addArc(
+            center: CGPoint(x: maxX - radius, y: minY + radius),
+            radius: radius,
+            startAngle: .degrees(-90),
+            endAngle: .degrees(0),
+            clockwise: false
+        )
+        outline.addLine(to: CGPoint(x: maxX, y: maxY - radius))
+        outline.addArc(
+            center: CGPoint(x: maxX - radius, y: maxY - radius),
+            radius: radius,
+            startAngle: .degrees(0),
+            endAngle: .degrees(90),
+            clockwise: false
+        )
+        outline.addLine(to: CGPoint(x: minX + radius, y: maxY))
+        outline.addArc(
+            center: CGPoint(x: minX + radius, y: maxY - radius),
+            radius: radius,
+            startAngle: .degrees(90),
+            endAngle: .degrees(180),
+            clockwise: false
+        )
+        outline.addLine(to: CGPoint(x: minX, y: minY + radius))
+        outline.addArc(
+            center: CGPoint(x: minX + radius, y: minY + radius),
+            radius: radius,
+            startAngle: .degrees(180),
+            endAngle: .degrees(270),
+            clockwise: false
+        )
+        outline.addLine(to: CGPoint(x: midX, y: minY))
+
+        return outline.trimmedPath(from: 0, to: CGFloat(clamped))
     }
 }
 
@@ -1709,7 +1780,7 @@ private struct ShareDestinationGrid: View {
         }
         #if os(iOS)
         .sheet(item: $shareItem) { item in
-            ActivityShareSheet(items: [item.url])
+            ActivityShareSheet(url: item.url, title: item.title)
         }
         #endif
     }
@@ -1723,7 +1794,7 @@ private struct ShareDestinationGrid: View {
                 isPreparingShare = false
                 guard let outputURL else { return }
                 #if os(iOS)
-                shareItem = ShareSheetItem(url: outputURL)
+                shareItem = ShareSheetItem(url: outputURL, title: viewModel.outputSuggestedFileName ?? outputURL.lastPathComponent)
                 #else
                 viewModel.alert = AppMessage(title: "MP4 ready", message: outputURL.path)
                 #endif
@@ -1765,17 +1836,58 @@ private struct ShareDestinationTile: View {
 private struct ShareSheetItem: Identifiable {
     let id = UUID()
     let url: URL
+    let title: String
 }
 
 #if os(iOS)
 private struct ActivityShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
+    let url: URL
+    let title: String
 
     func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+        UIActivityViewController(
+            activityItems: [VideoActivityItemSource(url: url, title: title)],
+            applicationActivities: nil
+        )
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {
+    }
+}
+
+private final class VideoActivityItemSource: NSObject, UIActivityItemSource {
+    private let url: URL
+    private let title: String
+
+    init(url: URL, title: String) {
+        self.url = url
+        self.title = title
+        super.init()
+    }
+
+    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
+        url
+    }
+
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        itemForActivityType activityType: UIActivity.ActivityType?
+    ) -> Any? {
+        url
+    }
+
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        subjectForActivityType activityType: UIActivity.ActivityType?
+    ) -> String {
+        title
+    }
+
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        dataTypeIdentifierForActivityType activityType: UIActivity.ActivityType?
+    ) -> String {
+        UTType.mpeg4Movie.identifier
     }
 }
 #endif
