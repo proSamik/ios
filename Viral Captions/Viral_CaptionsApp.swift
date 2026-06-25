@@ -12,8 +12,12 @@ struct Viral_CaptionsApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                #if os(macOS)
+                .frame(minWidth: 1080, minHeight: 720)
+                #endif
         }
         #if os(macOS)
+        .defaultSize(width: 1180, height: 820)
         .windowToolbarStyle(.unified)
         #endif
     }

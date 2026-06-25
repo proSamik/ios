@@ -396,7 +396,7 @@ private struct CreateWorkspace: View {
             ScrollView {
                 LazyVStack(spacing: 20) {
                     if proxy.size.width >= 940 {
-                        HStack(alignment: .top, spacing: 18) {
+                        if viewModel.selectedVideo == nil {
                             VStack(spacing: 18) {
                                 MediaCard(
                                     viewModel: viewModel,
@@ -404,21 +404,35 @@ private struct CreateWorkspace: View {
                                 )
                                 TemplateCard(viewModel: viewModel)
                             }
-                            .frame(maxWidth: 500)
-
-                            VStack(spacing: 18) {
-                                if viewModel.selectedVideo != nil {
-                                    CoreRenderOptionsCard(viewModel: viewModel, onPickSRT: onPickSRT)
-                                    RenderCard(viewModel: viewModel)
-                                }
-                                if viewModel.hasResult {
-                                    ResultCard(
-                                        viewModel: viewModel,
-                                        onSaveOutput: onSaveOutput
-                                    )
-                                }
-                            }
+                            .frame(maxWidth: 1040)
                             .frame(maxWidth: .infinity)
+                        } else {
+                            HStack(alignment: .top, spacing: 18) {
+                                VStack(spacing: 18) {
+                                    MediaCard(
+                                        viewModel: viewModel,
+                                        onPickVideo: onPickVideo
+                                    )
+                                    TemplateCard(viewModel: viewModel)
+                                }
+                                .frame(width: 500)
+
+                                VStack(spacing: 18) {
+                                    CoreRenderOptionsCard(
+                                        viewModel: viewModel,
+                                        onPickSRT: onPickSRT,
+                                        forceExpanded: true
+                                    )
+                                    RenderCard(viewModel: viewModel)
+                                    if viewModel.hasResult {
+                                        ResultCard(
+                                            viewModel: viewModel,
+                                            onSaveOutput: onSaveOutput
+                                        )
+                                    }
+                                }
+                                .frame(minWidth: 540, maxWidth: .infinity)
+                            }
                         }
                     } else {
                         VStack(spacing: 18) {
@@ -428,7 +442,11 @@ private struct CreateWorkspace: View {
                             )
                             TemplateCard(viewModel: viewModel)
                             if viewModel.selectedVideo != nil {
-                                CoreRenderOptionsCard(viewModel: viewModel, onPickSRT: onPickSRT)
+                                CoreRenderOptionsCard(
+                                    viewModel: viewModel,
+                                    onPickSRT: onPickSRT,
+                                    forceExpanded: false
+                                )
                                 RenderCard(viewModel: viewModel)
                             }
                             if viewModel.hasResult {
@@ -579,12 +597,7 @@ private struct MediaCard: View {
                 CardHeader(title: "Media", systemImage: "film.fill")
 
                 if let video = viewModel.selectedVideo {
-                    ZStack {
-                        SelectedVideoSummary(video: video)
-                        if viewModel.isImportingVideo {
-                            VideoImportOverlay(progress: viewModel.videoImportProgress)
-                        }
-                    }
+                    SelectedVideoSummary(video: video)
                 }
 
                 LiquidGlassGroup(spacing: 10) {
@@ -718,6 +731,7 @@ private struct VideoImportOverlay: View {
 
 private struct TemplateCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    @State private var previewItem: TemplatePreviewItem?
 
     var body: some View {
         BrandCard {
@@ -734,6 +748,8 @@ private struct TemplateCard: View {
                                     playbackEnabled: !viewModel.isRendering
                                 ) {
                                     viewModel.selectedTemplateId = template.id
+                                } onPreview: { url in
+                                    previewItem = TemplatePreviewItem(url: url)
                                 }
                             }
                         }
@@ -743,7 +759,42 @@ private struct TemplateCard: View {
                 }
             }
         }
+        #if os(iOS)
+        .fullScreenCover(item: $previewItem) { item in
+            FullScreenVideoPlayer(
+                url: item.url,
+                isPresented: Binding(
+                    get: { previewItem != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            previewItem = nil
+                        }
+                    }
+                )
+            )
+        }
+        #else
+        .sheet(item: $previewItem) { item in
+            FullScreenVideoPlayer(
+                url: item.url,
+                isPresented: Binding(
+                    get: { previewItem != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            previewItem = nil
+                        }
+                    }
+                )
+            )
+            .frame(minWidth: 720, minHeight: 520)
+        }
+        #endif
     }
+}
+
+private struct TemplatePreviewItem: Identifiable {
+    let id = UUID()
+    let url: URL
 }
 
 private struct TemplateButton: View {
@@ -751,7 +802,7 @@ private struct TemplateButton: View {
     let selected: Bool
     let playbackEnabled: Bool
     var action: () -> Void
-    @State private var isShowingFullPreview = false
+    var onPreview: (URL) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -762,7 +813,9 @@ private struct TemplateButton: View {
                     HStack {
                         Spacer()
                         Button {
-                            isShowingFullPreview = true
+                            if let url = template.previewVideoURL {
+                                onPreview(url)
+                            }
                         } label: {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 12, weight: .bold))
@@ -823,20 +876,6 @@ private struct TemplateButton: View {
         .shadow(color: selected ? Brand.navy.opacity(0.20) : .clear, radius: 10, x: 0, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture(perform: action)
-        #if os(iOS)
-        .fullScreenCover(isPresented: $isShowingFullPreview) {
-            if let url = template.previewVideoURL {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPreview)
-            }
-        }
-        #else
-        .sheet(isPresented: $isShowingFullPreview) {
-            if let url = template.previewVideoURL {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPreview)
-                    .frame(minWidth: 420, minHeight: 680)
-            }
-        }
-        #endif
     }
 }
 
@@ -1051,6 +1090,7 @@ private struct LanguageMenu: View {
 
 private struct AspectRatioControl: View {
     @Binding var selection: OutputAspectRatio
+    @Namespace private var selectionNamespace
 
     var body: some View {
         LiquidGlassGroup(spacing: 8) {
@@ -1059,9 +1099,13 @@ private struct AspectRatioControl: View {
                     OptionChip(
                         title: ratio.rawValue,
                         systemImage: aspectIcon(for: ratio),
-                        selected: ratio == selection
+                        selected: ratio == selection,
+                        selectionNamespace: selectionNamespace,
+                        selectionID: "aspect-ratio"
                     ) {
-                        selection = ratio
+                        withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                            selection = ratio
+                        }
                     }
                 }
             }
@@ -1083,6 +1127,7 @@ private struct AspectRatioControl: View {
 
 private struct PlacementControl: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    @Namespace private var selectionNamespace
 
     private let rows: [[CaptionPlacement]] = [
         [.none, .bottom],
@@ -1098,9 +1143,13 @@ private struct PlacementControl: View {
                             OptionChip(
                                 title: placement.label,
                                 systemImage: icon(for: placement),
-                                selected: placement == viewModel.placement
+                                selected: placement == viewModel.placement,
+                                selectionNamespace: selectionNamespace,
+                                selectionID: "placement"
                             ) {
-                                viewModel.selectPlacement(placement)
+                                withAnimation(.spring(response: 0.30, dampingFraction: 0.82)) {
+                                    viewModel.selectPlacement(placement)
+                                }
                             }
                         }
                     }
@@ -1128,6 +1177,8 @@ private struct OptionChip: View {
     let title: String
     let systemImage: String
     let selected: Bool
+    let selectionNamespace: Namespace.ID
+    let selectionID: String
     var action: () -> Void
 
     var body: some View {
@@ -1141,6 +1192,14 @@ private struct OptionChip: View {
             }
         }
         .buttonStyle(.plain)
+        .background {
+            if selected {
+                Capsule()
+                    .fill(Brand.surface.opacity(0.55))
+                    .nativeGlassCapsule()
+                    .matchedGeometryEffect(id: selectionID, in: selectionNamespace)
+            }
+        }
         .nativeGlassCapsule(interactive: true)
         .overlay {
             if selected {
@@ -1165,7 +1224,12 @@ private struct OptionChip: View {
 private struct CoreRenderOptionsCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onPickSRT: () -> Void
+    var forceExpanded = false
     @State private var isExpanded = false
+
+    private var showsExpandedContent: Bool {
+        forceExpanded || isExpanded
+    }
 
     var body: some View {
         BrandCard {
@@ -1182,14 +1246,16 @@ private struct CoreRenderOptionsCard: View {
                         .foregroundStyle(Brand.ink)
                     Spacer(minLength: 0)
 
-                    Button {
-                        isExpanded.toggle()
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .frame(width: 34, height: 34)
+                    if !forceExpanded {
+                        Button {
+                            isExpanded.toggle()
+                        } label: {
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .frame(width: 34, height: 34)
+                        }
+                        .nativeGlassButton()
+                        .accessibilityLabel(isExpanded ? "Collapse render settings" : "Expand render settings")
                     }
-                    .nativeGlassButton()
-                    .accessibilityLabel(isExpanded ? "Collapse render settings" : "Expand render settings")
                 }
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
@@ -1198,7 +1264,7 @@ private struct CoreRenderOptionsCard: View {
                     MetricPill(text: viewModel.placement.label, systemImage: placementIcon)
                 }
 
-                if isExpanded {
+                if showsExpandedContent {
                     VStack(alignment: .leading, spacing: 16) {
                         VStack(alignment: .leading, spacing: 7) {
                             Text("Language")
@@ -1244,7 +1310,7 @@ private struct CoreRenderOptionsCard: View {
                 }
             }
         }
-        .animation(nil, value: isExpanded)
+        .animation(nil, value: showsExpandedContent)
         .task(id: viewModel.selectedLanguage) {
             await viewModel.refreshLocalTranscriptionSupport()
         }
