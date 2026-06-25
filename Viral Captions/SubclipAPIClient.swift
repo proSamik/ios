@@ -43,6 +43,16 @@ struct SubclipAPIClient {
         )
     }
 
+    func quota(apiKey: String) async throws -> QuotaResponse {
+        try await jsonRequest(
+            apiKey: apiKey,
+            path: "/api/v1/quota",
+            method: "GET",
+            body: Optional<EmptyBody>.none,
+            responseType: QuotaResponse.self
+        )
+    }
+
     func uploadFile(fileURL: URL, uploadURL: URL, contentType: String, fileSize: Int64) async throws {
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "PUT"
@@ -230,4 +240,29 @@ struct DownloadInfoResponse: Decodable {
     let contentType: String?
     let fileSize: Int64?
     let fileName: String?
+}
+
+struct QuotaResponse: Decodable, Equatable {
+    struct Storage: Decodable, Equatable {
+        let applies: Bool
+        let usedBytes: Int64?
+        let remainingBytes: Int64?
+        let limitBytes: Int64?
+        let message: String?
+    }
+
+    struct UploadCheck: Decodable, Equatable {
+        let fileSizeBytes: Int64?
+        let allowed: Bool
+    }
+
+    struct AICredits: Decodable, Equatable {
+        let allowed: Bool
+        let balance: Double?
+        let estimatedCredits: Double?
+    }
+
+    let storage: Storage?
+    let uploadCheck: UploadCheck?
+    let aiCredits: AICredits
 }

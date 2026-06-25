@@ -390,80 +390,258 @@ private struct CreateWorkspace: View {
     var onPickVideo: () -> Void
     var onPickSRT: () -> Void
     var onSaveOutput: (URL) -> Void
+    @State private var step: CreateStep = .upload
 
     var body: some View {
         GeometryReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 20) {
-                    if proxy.size.width >= 940 {
-                        if viewModel.selectedVideo == nil {
-                            VStack(spacing: 18) {
-                                MediaCard(
-                                    viewModel: viewModel,
-                                    onPickVideo: onPickVideo
-                                )
-                                TemplateCard(viewModel: viewModel)
-                            }
-                            .frame(maxWidth: 1040)
-                            .frame(maxWidth: .infinity)
-                        } else {
-                            HStack(alignment: .top, spacing: 18) {
-                                VStack(spacing: 18) {
-                                    MediaCard(
-                                        viewModel: viewModel,
-                                        onPickVideo: onPickVideo
-                                    )
-                                    TemplateCard(viewModel: viewModel)
-                                }
-                                .frame(width: 500)
-
-                                VStack(spacing: 18) {
-                                    CoreRenderOptionsCard(
-                                        viewModel: viewModel,
-                                        onPickSRT: onPickSRT,
-                                        forceExpanded: true
-                                    )
-                                    RenderCard(viewModel: viewModel)
-                                    if viewModel.hasResult {
-                                        ResultCard(
-                                            viewModel: viewModel,
-                                            onSaveOutput: onSaveOutput
-                                        )
-                                    }
-                                }
-                                .frame(minWidth: 540, maxWidth: .infinity)
+                    if showsStepProgressHeader {
+                        StepProgressHeader(step: step, canOpenLaterSteps: viewModel.selectedVideo != nil) { nextStep in
+                            guard nextStep == .upload || viewModel.selectedVideo != nil else { return }
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                                step = nextStep
                             }
                         }
-                    } else {
-                        VStack(spacing: 18) {
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    Group {
+                        switch step {
+                        case .upload:
                             MediaCard(
                                 viewModel: viewModel,
                                 onPickVideo: onPickVideo
                             )
-                            TemplateCard(viewModel: viewModel)
-                            if viewModel.selectedVideo != nil {
-                                CoreRenderOptionsCard(
-                                    viewModel: viewModel,
-                                    onPickSRT: onPickSRT,
-                                    forceExpanded: false
-                                )
-                                RenderCard(viewModel: viewModel)
+                        case .style:
+                            TemplateCard(viewModel: viewModel, layout: proxy.size.width >= 940 ? .compactGrid : .grid)
+                        case .settings:
+                            VStack(spacing: 18) {
+                                if viewModel.needsAPIKeyValidation {
+                                    APIKeyCard(viewModel: viewModel)
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                } else {
+                                    ExportPreparationCard(
+                                        viewModel: viewModel,
+                                        onPickSRT: onPickSRT
+                                    )
+                                    RenderCard(viewModel: viewModel)
+                                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                    CoreRenderOptionsCard(
+                                        viewModel: viewModel,
+                                        onPickSRT: onPickSRT,
+                                        forceExpanded: false
+                                    )
+                                }
+
+                                if viewModel.hasResult {
+                                    ResultCard(
+                                        viewModel: viewModel,
+                                        onSaveOutput: onSaveOutput
+                                    )
+                                }
                             }
-                            if viewModel.hasResult {
-                                ResultCard(
-                                    viewModel: viewModel,
-                                    onSaveOutput: onSaveOutput
-                                )
-                            }
+                            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: viewModel.needsAPIKeyValidation)
                         }
+                    }
+                    .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
+                    .frame(minHeight: stepContentMinHeight(for: proxy.size), alignment: .center)
+
+                    if showsStepNavigation {
+                        StepNavigationBar(
+                            step: step,
+                            canContinue: canContinue,
+                            continueTitle: continueTitle,
+                            onBack: moveBack,
+                            onContinue: moveForward
+                        )
+                        .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
+                    }
+                }
+                .onChange(of: viewModel.selectedVideo?.id) { _, videoId in
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        step = videoId == nil ? .upload : .style
                     }
                 }
                 .frame(maxWidth: 1180)
                 .padding(.horizontal, proxy.size.width < 520 ? 14 : 24)
                 .padding(.vertical, proxy.size.width < 520 ? 16 : 26)
+                .padding(.bottom, 110)
                 .frame(maxWidth: .infinity)
+                .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showsStepProgressHeader)
             }
             .background(AppBackground())
+        }
+    }
+
+    private var showsStepProgressHeader: Bool {
+        viewModel.selectedVideo != nil
+    }
+
+    private var canContinue: Bool {
+        switch step {
+        case .upload:
+            return viewModel.selectedVideo != nil
+        case .style:
+            return viewModel.selectedVideo != nil
+        case .settings:
+            return false
+        }
+    }
+
+    private var continueTitle: String {
+        switch step {
+        case .upload:
+            return "Choose Style"
+        case .style:
+            return "Export"
+        case .settings:
+            return ""
+        }
+    }
+
+    private var showsStepNavigation: Bool {
+        switch step {
+        case .upload:
+            return viewModel.selectedVideo != nil
+        case .style:
+            return true
+        case .settings:
+            return false
+        }
+    }
+
+    private func moveBack() {
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            switch step {
+            case .upload:
+                break
+            case .style:
+                step = .upload
+            case .settings:
+                step = .style
+            }
+        }
+    }
+
+    private func moveForward() {
+        guard canContinue else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+            switch step {
+            case .upload:
+                step = .style
+            case .style:
+                step = .settings
+            case .settings:
+                break
+            }
+        }
+    }
+
+    private func stepContentMaxWidth(for width: CGFloat) -> CGFloat {
+        if width >= 940 {
+            return step == .style ? 1120 : 720
+        }
+        return .infinity
+    }
+
+    private func stepContentMinHeight(for size: CGSize) -> CGFloat {
+        guard step == .upload, viewModel.selectedVideo == nil else { return 0 }
+        return max(320, size.height - 220)
+    }
+}
+
+private enum CreateStep: Int, CaseIterable, Identifiable {
+    case upload = 1
+    case style = 2
+    case settings = 3
+
+    var id: Int { rawValue }
+
+    var title: String {
+        switch self {
+        case .upload:
+            return "Upload"
+        case .style:
+            return "Style"
+        case .settings:
+            return "Export"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .upload:
+            return "film.fill"
+        case .style:
+            return "sparkles"
+        case .settings:
+            return "square.and.arrow.up"
+        }
+    }
+}
+
+private struct StepProgressHeader: View {
+    let step: CreateStep
+    let canOpenLaterSteps: Bool
+    var onSelect: (CreateStep) -> Void
+
+    var body: some View {
+        LiquidGlassGroup(spacing: 8) {
+            HStack(spacing: 8) {
+                ForEach(CreateStep.allCases) { item in
+                    Button {
+                        onSelect(item)
+                    } label: {
+                        HStack(spacing: 7) {
+                            Text("\(item.rawValue)")
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .frame(width: 22, height: 22)
+                                .background(step == item ? Brand.navy : Color.primary.opacity(0.08), in: Circle())
+                                .foregroundStyle(step == item ? .white : Brand.muted)
+                            Text(item.title)
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                    }
+                    .nativeGlassButton(prominent: step == item)
+                    .disabled(item != .upload && !canOpenLaterSteps)
+                }
+            }
+        }
+    }
+}
+
+private struct StepNavigationBar: View {
+    let step: CreateStep
+    let canContinue: Bool
+    let continueTitle: String
+    var onBack: () -> Void
+    var onContinue: () -> Void
+
+    var body: some View {
+        LiquidGlassGroup(spacing: 10) {
+            HStack(spacing: 10) {
+                if step != .upload {
+                    Button(action: onBack) {
+                        Label("Back", systemImage: "chevron.left")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .nativeGlassButton()
+                }
+
+                if step != .settings {
+                    Button(action: onContinue) {
+                        Label(continueTitle, systemImage: "chevron.right")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .nativeGlassButton(prominent: canContinue)
+                    .disabled(!canContinue)
+                }
+            }
         }
     }
 }
@@ -537,6 +715,9 @@ private struct APIKeyCard: View {
                         apiKeyFocused = false
                     }
                     #endif
+                    .onChange(of: viewModel.apiKey) { _, _ in
+                        viewModel.apiKeyDidChange()
+                    }
 
                 LiquidGlassGroup(spacing: 10) {
                     HStack(spacing: 10) {
@@ -552,10 +733,14 @@ private struct APIKeyCard: View {
                             #endif
                             viewModel.saveAPIKey()
                         } label: {
-                            Label("Save key", systemImage: "checkmark.seal.fill")
+                            Label(
+                                viewModel.isCheckingQuota ? "Checking credits" : "Check credits & save",
+                                systemImage: viewModel.isCheckingQuota ? "clock.arrow.circlepath" : "checkmark.seal.fill"
+                            )
                                 .frame(maxWidth: .infinity)
                         }
                         .nativeGlassButton()
+                        .disabled(viewModel.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isCheckingQuota)
 
                         Button {
                             viewModel.clearAPIKey()
@@ -574,6 +759,19 @@ private struct APIKeyCard: View {
                 }
                 .nativeGlassButton()
 
+                if let quota = viewModel.quotaInfo {
+                    HStack(spacing: 8) {
+                        Image(systemName: quota.aiCredits.allowed ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                            .foregroundStyle(quota.aiCredits.allowed ? Brand.navy : .orange)
+                        Text(quotaSummary(for: quota))
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(Brand.ink)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(10)
+                    .nativeGlassPanel(cornerRadius: 8)
+                }
+
                 HStack(spacing: 8) {
                     Image(systemName: "lock.fill")
                         .foregroundStyle(Brand.navy)
@@ -584,6 +782,11 @@ private struct APIKeyCard: View {
                 }
             }
         }
+    }
+
+    private func quotaSummary(for quota: QuotaResponse) -> String {
+        let balance = quota.aiCredits.balance.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "Unknown"
+        return "AI credits available: \(balance)."
     }
 }
 
@@ -614,20 +817,6 @@ private struct MediaCard: View {
                             )
                         }
                         .nativeGlassButton(prominent: viewModel.selectedVideo == nil)
-
-                        if viewModel.selectedVideo != nil {
-                            Button {
-                                viewModel.render()
-                            } label: {
-                                Label(viewModel.isRendering ? viewModel.phase.label : "Add Captions", systemImage: "wand.and.stars")
-                                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    .foregroundStyle(Brand.ink)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 7)
-                            }
-                            .nativeGlassButton()
-                            .disabled(!viewModel.canRender)
-                        }
                     }
                 }
             }
@@ -731,6 +920,7 @@ private struct VideoImportOverlay: View {
 
 private struct TemplateCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
+    var layout: TemplateLayout = .carousel
     @State private var previewItem: TemplatePreviewItem?
 
     var body: some View {
@@ -738,24 +928,22 @@ private struct TemplateCard: View {
             VStack(alignment: .leading, spacing: 14) {
                 CardHeader(title: "Choose Style", systemImage: "sparkles")
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LiquidGlassGroup(spacing: 10) {
-                        LazyHStack(spacing: 10) {
-                            ForEach(CaptionTemplate.all) { template in
-                                TemplateButton(
-                                    template: template,
-                                    selected: template.id == viewModel.selectedTemplateId,
-                                    playbackEnabled: !viewModel.isRendering
-                                ) {
-                                    viewModel.selectedTemplateId = template.id
-                                } onPreview: { url in
-                                    previewItem = TemplatePreviewItem(url: url)
-                                }
-                            }
+                if layout.isGrid {
+                    LiquidGlassGroup(spacing: 12) {
+                        LazyVGrid(columns: gridColumns, spacing: 12) {
+                            templateButtons
                         }
-                        .padding(.horizontal, 8)
                     }
-                    .padding(.vertical, 2)
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LiquidGlassGroup(spacing: 10) {
+                            LazyHStack(spacing: 10) {
+                                templateButtons
+                            }
+                            .padding(.horizontal, 8)
+                        }
+                        .padding(.vertical, 2)
+                    }
                 }
             }
         }
@@ -790,6 +978,36 @@ private struct TemplateCard: View {
         }
         #endif
     }
+
+    private var gridColumns: [GridItem] {
+        switch layout {
+        case .carousel:
+            return []
+        case .grid:
+            return [
+                GridItem(.flexible(), spacing: 12),
+                GridItem(.flexible(), spacing: 12)
+            ]
+        case .compactGrid:
+            return Array(repeating: GridItem(.flexible(), spacing: 12), count: 5)
+        }
+    }
+
+    @ViewBuilder
+    private var templateButtons: some View {
+        ForEach(CaptionTemplate.all) { template in
+            TemplateButton(
+                template: template,
+                selected: template.id == viewModel.selectedTemplateId,
+                playbackEnabled: !viewModel.isRendering,
+                layout: layout
+            ) {
+                viewModel.selectedTemplateId = template.id
+            } onPreview: { url in
+                previewItem = TemplatePreviewItem(url: url)
+            }
+        }
+    }
 }
 
 private struct TemplatePreviewItem: Identifiable {
@@ -797,10 +1015,17 @@ private struct TemplatePreviewItem: Identifiable {
     let url: URL
 }
 
+private enum TemplateLayout: Equatable {
+    case carousel
+    case grid
+    case compactGrid
+}
+
 private struct TemplateButton: View {
     let template: CaptionTemplate
     let selected: Bool
     let playbackEnabled: Bool
+    let layout: TemplateLayout
     var action: () -> Void
     var onPreview: (URL) -> Void
 
@@ -845,7 +1070,7 @@ private struct TemplateButton: View {
                     .nativeGlassPanel(cornerRadius: 6)
                     .padding(8)
             }
-            .frame(width: 150, height: 267)
+            .modifier(TemplatePreviewFrame(layout: layout))
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -857,14 +1082,18 @@ private struct TemplateButton: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Brand.ink)
                     .lineLimit(1)
-                Text(template.description)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Brand.muted)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+
+                if layout != .compactGrid {
+                    Text(template.description)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Brand.muted)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.86)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
-        .frame(width: 150, alignment: .leading)
+        .frame(maxWidth: layout.cardMaxWidth, alignment: .leading)
         .padding(10)
         .nativeGlassPanel(cornerRadius: 8, interactive: true)
         .overlay {
@@ -879,6 +1108,48 @@ private struct TemplateButton: View {
         .shadow(color: selected ? Brand.navy.opacity(0.20) : .clear, radius: 10, x: 0, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .onTapGesture(perform: action)
+    }
+}
+
+private struct TemplatePreviewFrame: ViewModifier {
+    let layout: TemplateLayout
+
+    func body(content: Content) -> some View {
+        switch layout {
+        case .carousel:
+            content
+                .frame(width: 150, height: 267)
+        case .grid:
+            content
+                .aspectRatio(9.0 / 16.0, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+        case .compactGrid:
+            content
+                .aspectRatio(9.0 / 14.0, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+private extension TemplateLayout {
+    var isGrid: Bool {
+        switch self {
+        case .grid, .compactGrid:
+            return true
+        case .carousel:
+            return false
+        }
+    }
+
+    var cardMaxWidth: CGFloat {
+        switch self {
+        case .carousel:
+            return 150
+        case .grid:
+            return .infinity
+        case .compactGrid:
+            return 160
+        }
     }
 }
 
@@ -1269,10 +1540,12 @@ private struct CoreRenderOptionsCard: View {
                     }
                 }
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
-                    MetricPill(text: languageSummary, systemImage: "textformat")
-                    MetricPill(text: viewModel.aspectRatio.rawValue, systemImage: aspectIcon)
-                    MetricPill(text: viewModel.placement.label, systemImage: placementIcon)
+                if !showsExpandedContent {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+                        MetricPill(text: languageSummary, systemImage: "textformat")
+                        MetricPill(text: viewModel.aspectRatio.rawValue, systemImage: aspectIcon)
+                        MetricPill(text: viewModel.placement.label, systemImage: placementIcon)
+                    }
                 }
 
                 if showsExpandedContent {
@@ -1309,13 +1582,6 @@ private struct CoreRenderOptionsCard: View {
                                 .foregroundStyle(Brand.ink)
                         }
 
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("Advanced")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(Brand.slate)
-                            LocalTranscriptionControl(viewModel: viewModel)
-                            SRTAttachmentControl(viewModel: viewModel, onPickSRT: onPickSRT)
-                        }
                     }
                     .transition(.identity)
                 }
@@ -1555,7 +1821,7 @@ private struct RenderCard: View {
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 16) {
-                CardHeader(title: "Add Captions", systemImage: "bolt.fill")
+                CardHeader(title: "Export Video", systemImage: "square.and.arrow.up.fill")
 
                 Button {
                     viewModel.render()
@@ -1567,7 +1833,7 @@ private struct RenderCard: View {
                         } else {
                             Image(systemName: "wand.and.stars")
                         }
-                        Text(viewModel.isRendering ? viewModel.phase.label : "Add Captions")
+                        Text(viewModel.isRendering ? viewModel.phase.label : "Export Video")
                     }
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(Brand.navy.opacity(renderLabelOpacity))
@@ -1595,6 +1861,41 @@ private struct RenderCard: View {
                 }
             }
         }
+    }
+}
+
+private struct ExportPreparationCard: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+    var onPickSRT: () -> Void
+
+    var body: some View {
+        BrandCard {
+            VStack(alignment: .leading, spacing: 14) {
+                CardHeader(title: "Captions", systemImage: "captions.bubble.fill")
+
+                Toggle(
+                    isOn: Binding(
+                        get: { viewModel.autoTranscribe },
+                        set: { viewModel.setAutoTranscribe($0) }
+                    )
+                ) {
+                    Label("Auto Transcribe", systemImage: "waveform")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(Brand.ink)
+                }
+                .padding(12)
+                .nativeGlassPanel(cornerRadius: 8, interactive: true)
+
+                if !viewModel.autoTranscribe {
+                    VStack(alignment: .leading, spacing: 10) {
+                        LocalTranscriptionControl(viewModel: viewModel)
+                        SRTAttachmentControl(viewModel: viewModel, onPickSRT: onPickSRT)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+        }
+        .animation(.spring(response: 0.30, dampingFraction: 0.86), value: viewModel.autoTranscribe)
     }
 }
 

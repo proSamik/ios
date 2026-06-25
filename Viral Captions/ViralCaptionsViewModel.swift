@@ -1,4 +1,5 @@
 import Combine
+import CryptoKit
 import Foundation
 
 @MainActor
@@ -51,6 +52,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var aspectRatio: OutputAspectRatio = .vertical
     @Published var placement: CaptionPlacement = .none
     @Published var faceTrack = true
+    @Published var autoTranscribe = true
     @Published var outputFileName = ""
     @Published var phase: RenderPhase = .idle
     @Published var statusMessage = "Choose a video to begin."
@@ -74,15 +76,21 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var transcriptionStatus = ""
     @Published var isSRTEditorPresented = false
     @Published var srtDraft = ""
+    @Published var isCheckingQuota = false
+    @Published var quotaInfo: QuotaResponse?
+    @Published var apiKeyValidated: Bool
 
     private let client = SubclipAPIClient()
     private var pollTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var outputCacheTask: Task<URL?, Never>?
     private var importedVideoURL: URL?
+    nonisolated private static let validatedAPIKeyHashKey = "validatedAPIKeyHash"
 
     init() {
-        self.apiKey = KeychainStore.readAPIKey()
+        let storedAPIKey = KeychainStore.readAPIKey()
+        self.apiKey = storedAPIKey
+        self.apiKeyValidated = Self.storedValidationMatches(storedAPIKey)
         self.uploadQueue = LocalUploadQueueStore.load()
     }
 
@@ -97,8 +105,14 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     var canRender: Bool {
         !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && apiKeyValidated
             && selectedVideo != nil
+            && (autoTranscribe || selectedSRT != nil)
             && !isRendering
+    }
+
+    var needsAPIKeyValidation: Bool {
+        apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !apiKeyValidated
     }
 
     var selectedTemplate: CaptionTemplate {
@@ -132,19 +146,60 @@ final class ViralCaptionsViewModel: ObservableObject {
         faceTrack = isEnabled
     }
 
-    func saveAPIKey() {
-        do {
-            try KeychainStore.saveAPIKey(apiKey.trimmingCharacters(in: .whitespacesAndNewlines))
-            alert = AppMessage(title: "API key saved", message: "Your key is stored locally in Keychain.")
-        } catch {
-            alert = AppMessage(title: "Could not save key", message: error.localizedDescription)
+    func setAutoTranscribe(_ isEnabled: Bool) {
+        autoTranscribe = isEnabled
+    }
+
+    func apiKeyDidChange() {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        apiKeyValidated = Self.storedValidationMatches(trimmedKey)
+        if !apiKeyValidated {
+            quotaInfo = nil
         }
+    }
+
+    func saveAPIKey() {
+        Task {
+            await validateAndSaveAPIKey()
+        }
+    }
+
+    func validateAndSaveAPIKey() async {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else {
+            apiKeyValidated = false
+            quotaInfo = nil
+            alert = AppMessage(title: "API key required", message: "Enter your Subclip API key to continue.")
+            return
+        }
+
+        isCheckingQuota = true
+        do {
+            let quota = try await client.quota(apiKey: trimmedKey)
+            guard quota.aiCredits.allowed else {
+                throw SubclipAPIError(message: "This API key does not have enough AI credits.")
+            }
+            try KeychainStore.saveAPIKey(trimmedKey)
+            UserDefaults.standard.set(Self.apiKeyHash(trimmedKey), forKey: Self.validatedAPIKeyHashKey)
+            apiKey = trimmedKey
+            quotaInfo = quota
+            apiKeyValidated = true
+            alert = AppMessage(title: "API key ready", message: quotaSuccessMessage(for: quota))
+        } catch {
+            apiKeyValidated = false
+            quotaInfo = nil
+            alert = AppMessage(title: "Could not verify API key", message: error.localizedDescription)
+        }
+        isCheckingQuota = false
     }
 
     func clearAPIKey() {
         do {
             try KeychainStore.deleteAPIKey()
             apiKey = ""
+            apiKeyValidated = false
+            quotaInfo = nil
+            UserDefaults.standard.removeObject(forKey: Self.validatedAPIKeyHashKey)
             alert = AppMessage(title: "API key removed", message: "The saved key was removed from Keychain.")
         } catch {
             alert = AppMessage(title: "Could not remove key", message: error.localizedDescription)
@@ -427,6 +482,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             statusMessage = "Creating secure upload URLs..."
             let shouldDeclareDimensions = selectedVideo.metadata.inferredAspectRatio != aspectRatio
 
+            let srtForRender = autoTranscribe ? nil : selectedSRT
             let uploadPayload = CreateUploadRequest(
                 projectName: selectedVideo.fileName.replacingOccurrences(of: ".\(selectedVideo.url.pathExtension)", with: ""),
                 video: .init(
@@ -437,7 +493,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                     width: shouldDeclareDimensions ? selectedVideo.metadata.width : nil,
                     height: shouldDeclareDimensions ? selectedVideo.metadata.height : nil
                 ),
-                srt: selectedSRT.map {
+                srt: srtForRender.map {
                     .init(fileName: $0.fileName, contentType: "text/plain", fileSize: $0.fileSize)
                 }
             )
@@ -461,15 +517,15 @@ final class ViralCaptionsViewModel: ObservableObject {
                 fileSize: selectedVideo.metadata.fileSize
             )
 
-            if let selectedSRT, let srtUpload = upload.srt {
+            if let srtForRender, let srtUpload = upload.srt {
                 phase = .uploadingSRT
                 progress = 0.28
-                statusMessage = "Uploading \(selectedSRT.fileName)..."
+                statusMessage = "Uploading \(srtForRender.fileName)..."
                 try await client.uploadFile(
-                    fileURL: selectedSRT.url,
+                    fileURL: srtForRender.url,
                     uploadURL: srtUpload.uploadUrl,
                     contentType: "text/plain",
-                    fileSize: selectedSRT.fileSize
+                    fileSize: srtForRender.fileSize
                 )
             }
 
@@ -799,6 +855,11 @@ final class ViralCaptionsViewModel: ObservableObject {
         return Date().addingTimeInterval(58 * 60)
     }
 
+    private func quotaSuccessMessage(for quota: QuotaResponse) -> String {
+        let balance = quota.aiCredits.balance.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "Unknown"
+        return "AI credits available: \(balance)."
+    }
+
     private func releaseVideoScope() {
         if selectedVideo?.securityScoped == true {
             selectedVideo?.url.stopAccessingSecurityScopedResource()
@@ -808,6 +869,17 @@ final class ViralCaptionsViewModel: ObservableObject {
             self.importedVideoURL = nil
         }
         selectedVideo = nil
+    }
+
+    nonisolated private static func storedValidationMatches(_ apiKey: String) -> Bool {
+        let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else { return false }
+        return UserDefaults.standard.string(forKey: validatedAPIKeyHashKey) == apiKeyHash(trimmedKey)
+    }
+
+    nonisolated private static func apiKeyHash(_ apiKey: String) -> String {
+        let digest = SHA256.hash(data: Data(apiKey.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     nonisolated private static func copyVideoIntoImports(from sourceURL: URL, fallbackFileName: String) throws -> URL {
