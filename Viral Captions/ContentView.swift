@@ -79,7 +79,7 @@ struct ContentView: View {
                 viewModel: viewModel,
                 onPickVideo: pickVideo,
                 onPickSRT: pickSRT,
-                onSaveOutput: saveOutput
+                onSaveOutput: saveURL
             )
             .tabItem {
                 Label("Create", systemImage: "wand.and.stars")
@@ -111,7 +111,7 @@ struct ContentView: View {
                 OutputReadyOverlay(
                     viewModel: viewModel,
                     onClose: { isShowingResultScreen = false },
-                    onDownload: saveOutput
+                    onDownload: saveURL
                 )
                 .transition(.opacity)
             }
@@ -384,7 +384,7 @@ private struct CreateWorkspace: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onPickVideo: () -> Void
     var onPickSRT: () -> Void
-    var onSaveOutput: () -> Void
+    var onSaveOutput: (URL) -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -1542,7 +1542,7 @@ private struct RenderProgressPreview: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 34, style: .continuous)
+            RoundedRectProgressShape(progress: 1, cornerRadius: 34, inset: 4)
                 .stroke(Color.primary.opacity(0.12), lineWidth: 8)
 
             if let player {
@@ -1668,7 +1668,7 @@ private struct RoundedRectProgressShape: Shape {
 private struct OutputReadyOverlay: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onClose: () -> Void
-    var onDownload: () -> Void
+    var onDownload: (URL) -> Void
     @Environment(\.colorScheme) private var colorScheme
 
     private var backgroundColor: Color {
@@ -1723,7 +1723,7 @@ private struct OutputReadyOverlay: View {
 
 private struct ResultCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
-    var onSaveOutput: () -> Void
+    var onSaveOutput: (URL) -> Void
 
     var body: some View {
         BrandCard {
@@ -1750,7 +1750,8 @@ private struct ResultCard: View {
 
 private struct ShareDestinationGrid: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
-    var onSaveOutput: () -> Void
+    var onSaveOutput: (URL) -> Void
+    @State private var isPreparingDownload = false
     @State private var isPreparingShare = false
     @State private var shareItem: ShareSheetItem?
 
@@ -1761,10 +1762,17 @@ private struct ShareDestinationGrid: View {
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 12) {
-            Button(action: onSaveOutput) {
-                ShareDestinationTile(title: "Download", systemImage: "arrow.down.to.line")
+            Button {
+                prepareDownload()
+            } label: {
+                ShareDestinationTile(
+                    title: isPreparingDownload ? "Preparing" : "Download",
+                    systemImage: "arrow.down.to.line",
+                    isLoading: isPreparingDownload
+                )
             }
             .buttonStyle(.plain)
+            .disabled(isPreparingDownload)
 
             Button {
                 prepareShare()
@@ -1783,6 +1791,19 @@ private struct ShareDestinationGrid: View {
             ActivityShareSheet(url: item.url, title: item.title)
         }
         #endif
+    }
+
+    private func prepareDownload() {
+        guard !isPreparingDownload else { return }
+        isPreparingDownload = true
+        Task {
+            let outputURL = await viewModel.downloadCurrentOutput()
+            await MainActor.run {
+                isPreparingDownload = false
+                guard let outputURL else { return }
+                onSaveOutput(outputURL)
+            }
+        }
     }
 
     private func prepareShare() {
