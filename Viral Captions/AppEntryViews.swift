@@ -29,6 +29,7 @@ struct LoginGateView: View {
     @ObservedObject var auth: BetterAuthStore
     @FocusState private var focusedField: Field?
     @State private var isShowingPasswordReset = false
+    @State private var isPasswordVisible = false
 
     private enum Field {
         case name, email, password, code
@@ -147,11 +148,30 @@ struct LoginGateView: View {
 
     private var passwordForm: some View {
         VStack(spacing: 14) {
-            SecureField("Password", text: $auth.password)
+            HStack(spacing: 8) {
+                Group {
+                    if isPasswordVisible {
+                        TextField("Password", text: $auth.password)
+                    } else {
+                        SecureField("Password", text: $auth.password)
+                    }
+                }
                 .focused($focusedField, equals: .password)
                 .textContentType(auth.mode == .signUp ? .newPassword : .password)
                 .font(.system(size: 16, weight: .medium))
-                .padding(.horizontal, 15)
+
+                Button {
+                    isPasswordVisible.toggle()
+                } label: {
+                    Image(systemName: isPasswordVisible ? "eye.slash.fill" : "eye.fill")
+                        .foregroundStyle(Brand.muted)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isPasswordVisible ? "Hide password" : "Show password")
+            }
+                .padding(.leading, 15)
+                .padding(.trailing, 8)
                 .frame(height: 52)
                 .background(Brand.softSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay {

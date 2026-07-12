@@ -81,7 +81,11 @@ struct ContentView: View {
                       let userID = viewModel.auth.session?.user.id
                 else { return }
                 await viewModel.bootstrapMobileAccount()
-                await revenueCat.configure(userID: userID)
+                await revenueCat.configure(
+                    userID: userID,
+                    email: viewModel.auth.session?.user.email,
+                    displayName: viewModel.auth.session?.user.name
+                )
             }
             .onChange(of: viewModel.lowCreditsPaywallRequestID) { _, requestID in
                 guard requestID != nil else { return }
@@ -90,6 +94,13 @@ struct ContentView: View {
             .onChange(of: viewModel.passRequiredPaywallRequestID) { _, requestID in
                 guard requestID != nil else { return }
                 Task { await presentRequiredPassPaywall() }
+            }
+            .onChange(of: viewModel.auth.isAuthenticated) { _, isAuthenticated in
+                if !isAuthenticated {
+                    revenueCat.reset()
+                    isShowingRevenueCatPaywall = false
+                    isShowingResultScreen = false
+                }
             }
         #endif
     }
@@ -944,6 +955,7 @@ private struct AuthenticationCard: View {
     @ObservedObject var auth: BetterAuthStore
     @FocusState private var focusedField: Field?
     @State private var isShowingDeleteAccount = false
+    @State private var isPasswordVisible = false
 
     private enum Field {
         case name, email, password, verificationCode
@@ -1140,10 +1152,28 @@ private struct AuthenticationCard: View {
 
     private var passwordContent: some View {
         VStack(alignment: .leading, spacing: 10) {
-            SecureField("Password", text: $auth.password)
+            HStack(spacing: 8) {
+                Group {
+                    if isPasswordVisible {
+                        TextField("Password", text: $auth.password)
+                    } else {
+                        SecureField("Password", text: $auth.password)
+                    }
+                }
                 .focused($focusedField, equals: .password)
                 .textContentType(auth.mode == .signUp ? .newPassword : .password)
-                .brandedInputField()
+
+                Button {
+                    isPasswordVisible.toggle()
+                } label: {
+                    Image(systemName: isPasswordVisible ? "eye.slash.fill" : "eye.fill")
+                        .foregroundStyle(Brand.muted)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isPasswordVisible ? "Hide password" : "Show password")
+            }
+            .brandedInputField()
 
             Button {
                 focusedField = nil
@@ -2260,6 +2290,16 @@ private struct LocalQueueCard: View {
                 openingProjectID = nil
             }
         }
+        .onChange(of: viewModel.outputURL) { _, localURL in
+            if localURL != nil {
+                openingProjectID = nil
+            }
+        }
+        .onChange(of: viewModel.isOpeningHistoryPreview) { _, isOpening in
+            if !isOpening {
+                openingProjectID = nil
+            }
+        }
         .onChange(of: viewModel.alert?.id) { _, alertID in
             if alertID != nil {
                 openingProjectID = nil
@@ -2303,7 +2343,7 @@ private struct LocalQueueRow: View {
                     }
                 }
 
-                if item.isDownloadAvailable {
+                if item.isResultReady {
                     HStack(spacing: 8) {
                         if isOpening {
                             ProgressView()
@@ -2324,7 +2364,7 @@ private struct LocalQueueRow: View {
             .nativeGlassPanel(cornerRadius: 8, interactive: true)
         }
         .buttonStyle(.plain)
-        .disabled(!item.isDownloadAvailable || isOpening)
+        .disabled(!item.isResultReady || isOpening)
     }
 }
 
@@ -2392,10 +2432,14 @@ private struct RenderCard: View {
 
                         Spacer(minLength: 8)
 
-                        Text("Based on video length")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Brand.muted)
-                            .multilineTextAlignment(.trailing)
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text("Available")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Brand.muted)
+                            Text(viewModel.quotaInfo?.aiCredits.balance?.formatted(.number.precision(.fractionLength(0...2))) ?? "—")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(Brand.navy)
+                        }
                     }
                     .padding(12)
                     .nativeGlassPanel(cornerRadius: 12)
@@ -2437,6 +2481,11 @@ private struct RenderCard: View {
                     .padding(12)
                     .nativeGlassPanel(cornerRadius: 8)
                 }
+            }
+        }
+        .task(id: viewModel.selectedVideo?.id) {
+            if viewModel.auth.isAuthenticated {
+                await viewModel.refreshQuota()
             }
         }
     }
@@ -2720,8 +2769,12 @@ private struct RenderProgressPreview: View {
     let progress: Double
     var autoplay = false
     var showsProgressBorder = true
+    var allowsFullScreen = false
+    var showsWatermark = false
     @State private var player: AVPlayer?
     @State private var playbackKickTask: Task<Void, Never>?
+    @State private var isShowingFullPlayer = false
+    @State private var isPlayerReady = false
 
     private var clampedProgress: Double {
         min(1, max(0, progress))
@@ -2744,10 +2797,45 @@ private struct RenderProgressPreview: View {
                     .padding(showsProgressBorder ? 18 : 0)
             }
 
+            if url != nil && !isPlayerReady {
+                VStack(spacing: 9) {
+                    ProgressView()
+                        .tint(.white)
+                    Text("Loading preview…")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 12)
+                .background(.black.opacity(0.44), in: Capsule())
+            }
+
             if showsProgressBorder {
                 RoundedRectProgressShape(progress: clampedProgress, cornerRadius: 34, inset: 4)
                     .stroke(Brand.navy, style: StrokeStyle(lineWidth: 8, lineCap: .round, lineJoin: .round))
                     .animation(.easeInOut(duration: 0.25), value: clampedProgress)
+            }
+
+            if showsWatermark {
+                ResultWatermark()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(showsProgressBorder ? 28 : 12)
+            }
+
+            if allowsFullScreen, url != nil {
+                Button {
+                    isShowingFullPlayer = true
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .background(.black.opacity(0.44), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("View result full screen")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(showsProgressBorder ? 28 : 12)
             }
         }
         .onAppear {
@@ -2776,6 +2864,20 @@ private struct RenderProgressPreview: View {
                 }
             }
         }
+        #if os(iOS)
+        .fullScreenCover(isPresented: $isShowingFullPlayer) {
+            if let url {
+                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
+            }
+        }
+        #else
+        .sheet(isPresented: $isShowingFullPlayer) {
+            if let url {
+                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
+                    .frame(minWidth: 720, minHeight: 520)
+            }
+        }
+        #endif
     }
 
     private func configurePlayer() {
@@ -2783,18 +2885,23 @@ private struct RenderProgressPreview: View {
         playbackKickTask = nil
         player?.pause()
         player?.replaceCurrentItem(with: nil)
+        player = nil
+        isPlayerReady = false
         guard let url else {
-            player = nil
             return
         }
-        let item = AVPlayerItem(url: url)
-        let nextPlayer = AVPlayer(playerItem: item)
-        nextPlayer.isMuted = true
-        nextPlayer.actionAtItemEnd = .none
-        nextPlayer.automaticallyWaitsToMinimizeStalling = true
-        player = nextPlayer
-        if autoplay {
-            startAutoplay(for: nextPlayer)
+        playbackKickTask = Task { @MainActor in
+            let asset = AVURLAsset(url: url)
+            guard (try? await asset.load(.isPlayable)) == true, !Task.isCancelled else { return }
+            let nextPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            nextPlayer.isMuted = true
+            nextPlayer.actionAtItemEnd = .none
+            nextPlayer.automaticallyWaitsToMinimizeStalling = true
+            player = nextPlayer
+            isPlayerReady = true
+            if autoplay {
+                startAutoplay(for: nextPlayer)
+            }
         }
     }
 
@@ -2940,7 +3047,9 @@ private struct OutputReadyOverlay: View {
                                 url: previewURL,
                                 progress: 1,
                                 autoplay: true,
-                                showsProgressBorder: false
+                                showsProgressBorder: false,
+                                allowsFullScreen: true,
+                                showsWatermark: true
                             )
                                 .frame(
                                     size: overlayPreviewSize(
@@ -2967,10 +3076,6 @@ private struct OutputReadyOverlay: View {
                     .padding(.top, 92)
                     .padding(.bottom, 36)
                 }
-                .task(id: viewModel.resultPreviewURL) {
-                    viewModel.cacheCurrentOutput()
-                }
-
                 Button(action: onClose) {
                     Image(systemName: "xmark")
                         .font(.system(size: 20, weight: .bold))
@@ -3031,6 +3136,9 @@ private struct OutputDownloadPreparation: View {
     }
 
     private var downloadStatusText: String {
+        if viewModel.isOpeningHistoryPreview {
+            return "Loading your video preview…"
+        }
         if let value = viewModel.outputDownloadProgress {
             return "Downloading securely… \(Int((value * 100).rounded()))%"
         }
@@ -3054,7 +3162,7 @@ private struct ResultCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let previewURL = viewModel.resultPreviewURL {
-                    VideoPreview(url: previewURL)
+                    VideoPreview(url: previewURL, showsWatermark: true)
                         .aspectRatio(viewModel.aspectRatio.previewAspect, contentMode: .fit)
                         .frame(maxWidth: viewModel.aspectRatio.previewMaxWidth)
                         .frame(maxWidth: .infinity)
@@ -3247,6 +3355,7 @@ private final class VideoActivityItemSource: NSObject, UIActivityItemSource {
 
 private struct VideoPreview: View {
     let url: URL?
+    var showsWatermark = false
     @State private var player: AVPlayer?
     @State private var isShowingFullPlayer = false
 
@@ -3269,6 +3378,12 @@ private struct VideoPreview: View {
                         }
                         .nativeGlassButton()
                         .padding(10)
+                    }
+                    .overlay(alignment: .bottomLeading) {
+                        if showsWatermark {
+                            ResultWatermark()
+                                .padding(10)
+                        }
                     }
             } else {
                 VStack(spacing: 12) {
@@ -3298,13 +3413,13 @@ private struct VideoPreview: View {
         #if os(iOS)
         .fullScreenCover(isPresented: $isShowingFullPlayer) {
             if let url {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer)
+                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
             }
         }
         #else
         .sheet(isPresented: $isShowingFullPlayer) {
             if let url {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer)
+                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
                     .frame(minWidth: 720, minHeight: 520)
             }
         }
@@ -3332,6 +3447,7 @@ private struct VideoPreview: View {
 private struct FullScreenVideoPlayer: View {
     let url: URL
     @Binding var isPresented: Bool
+    var showsWatermark = false
     @State private var player = AVPlayer()
 
     var body: some View {
@@ -3340,6 +3456,12 @@ private struct FullScreenVideoPlayer: View {
 
             VideoPlayer(player: player)
                 .ignoresSafeArea()
+
+            if showsWatermark {
+                ResultWatermark()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(20)
+            }
 
             Button {
                 isPresented = false
@@ -3362,6 +3484,23 @@ private struct FullScreenVideoPlayer: View {
             player.pause()
             player.replaceCurrentItem(with: nil)
         }
+    }
+}
+
+private struct ResultWatermark: View {
+    var body: some View {
+        Text("subclip.app")
+            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay {
+                Capsule().stroke(.white.opacity(0.28), lineWidth: 0.8)
+            }
+            .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
+            .allowsHitTesting(false)
+            .accessibilityLabel("Subclip dot app watermark")
     }
 }
 

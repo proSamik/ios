@@ -41,6 +41,15 @@ struct SubclipAPIClient {
         )
     }
 
+    func previewInfo(projectId: String) async throws -> DownloadInfoResponse {
+        try await jsonRequest(
+            path: "/api/v1/dynamic-captions/jobs/\(projectId)/download?purpose=preview",
+            method: "GET",
+            body: Optional<EmptyBody>.none,
+            responseType: DownloadInfoResponse.self
+        )
+    }
+
     func quota() async throws -> QuotaResponse {
         try await jsonRequest(
             path: "/api/v1/quota",
@@ -110,7 +119,9 @@ struct SubclipAPIClient {
         do {
             let destination = try outputFileURL(suggestedFileName: suggestedFileName, projectId: projectId)
             let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
-            guard let size = attributes[.size] as? Int64, size > 0 else { return nil }
+            guard let sizeNumber = attributes[.size] as? NSNumber else { return nil }
+            let size = sizeNumber.int64Value
+            guard size > 0 else { return nil }
             if let expectedSize, expectedSize > 0, size != expectedSize { return nil }
             return destination
         } catch {
@@ -146,7 +157,9 @@ struct SubclipAPIClient {
         body: Body?,
         responseType: Response.Type
     ) async throws -> Response {
-        let url = baseURL.appendingPathComponent(path)
+        guard let url = URL(string: path, relativeTo: baseURL)?.absoluteURL else {
+            throw SubclipAPIError(message: "The Subclip request URL is invalid.")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         guard let cookie = authClient.getCookie() else {

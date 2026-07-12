@@ -340,6 +340,10 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
         return Date() < downloadExpiresAt
     }
 
+    var isResultReady: Bool {
+        status == "Completed" || status == "Ready — pass required"
+    }
+
     var isCachedOutputStillAvailable: Bool {
         guard let localCacheExpiry = cachedOutputExpiresAt else { return false }
         return Date() < localCacheExpiry

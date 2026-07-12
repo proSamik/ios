@@ -15,7 +15,7 @@ final class RevenueCatStore: ObservableObject {
     private static let entitlementID = "premium"
     private var configuredUserID: String?
 
-    func configure(userID: String) async {
+    func configure(userID: String, email: String? = nil, displayName: String? = nil) async {
         guard !userID.isEmpty else { return }
 
         if configuredUserID != userID {
@@ -40,7 +40,39 @@ final class RevenueCatStore: ObservableObject {
             isConfigured = true
         }
 
+        await syncSubscriberAttributes(userID: userID, email: email, displayName: displayName)
+
         await refresh()
+    }
+
+    private func syncSubscriberAttributes(userID: String, email: String?, displayName: String?) async {
+        let normalizedEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let normalizedEmail, !normalizedEmail.isEmpty {
+            Purchases.shared.attribution.setEmail(normalizedEmail)
+        }
+        if let normalizedName, !normalizedName.isEmpty {
+            Purchases.shared.attribution.setDisplayName(normalizedName)
+        }
+
+        let bundle = Bundle.main
+        Purchases.shared.attribution.setAttributes([
+            "better_auth_user_id": userID,
+            "platform": "ios",
+            "account_source": "subclip_ios",
+            "app_version": bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown",
+            "app_build": bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown",
+            "locale": Locale.current.identifier,
+        ])
+
+        do {
+            _ = try await Purchases.shared.syncAttributesAndOfferingsIfNeeded()
+        } catch {
+            // Attribute delivery is retried by RevenueCat automatically. Keep
+            // purchases available if this non-critical sync is temporarily down.
+            print("RevenueCat attribute sync deferred: \(error.localizedDescription)")
+        }
     }
 
     func refresh() async {

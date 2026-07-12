@@ -256,6 +256,10 @@ final class BetterAuthStore: ObservableObject {
                 )
             }
 
+            // Explicitly clear the local BetterAuth cookie/session after the
+            // server confirms deletion. The remote account no longer exists,
+            // so sign-out is best-effort and must not change deletion success.
+            _ = try? await client.signOut()
             await waitForSessionRefresh(expectAuthenticatedSession: false, maxIterations: 8)
             password = ""
             verificationCode = ""

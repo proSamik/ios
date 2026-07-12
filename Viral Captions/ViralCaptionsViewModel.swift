@@ -51,7 +51,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var aspectRatio: OutputAspectRatio = .vertical
     @Published var placement: CaptionPlacement = .none
     @Published var faceTrack = true
-    @Published var autoTranscribe = true
+    @Published var autoTranscribe = false
     @Published var outputFileName = ""
     @Published var phase: RenderPhase = .idle
     @Published var statusMessage = "Choose a video to begin."
@@ -81,6 +81,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var outputDownloadProgress: Double?
     @Published var lowCreditsPaywallRequestID: UUID?
     @Published var passRequiredPaywallRequestID: UUID?
+    @Published var isOpeningHistoryPreview = false
 
     private let client: SubclipAPIClient
     private let localOutputCacheDuration: TimeInterval = 3600
@@ -112,8 +113,9 @@ final class ViralCaptionsViewModel: ObservableObject {
     var canRender: Bool {
         auth.isAuthenticated
             && selectedVideo != nil
-            && (autoTranscribe || selectedSRT != nil)
             && !isRendering
+            && !isTranscribing
+            && !isCheckingQuota
     }
 
     /// Mirrors the server's Dynamic Captions credit calculation so the cost is
@@ -122,7 +124,9 @@ final class ViralCaptionsViewModel: ObservableObject {
         guard let durationSeconds = selectedVideo?.metadata.durationSeconds else { return nil }
         let minutes = max(1.0 / 60.0, max(0, durationSeconds) / 60.0)
         let renderCredits = minutes
-        let transcriptionCredits = 1.0
+        // Export generates and uploads an SRT locally when one is not supplied,
+        // so the server does not need to charge for cloud transcription.
+        let transcriptionCredits = 0.0
         let analysisCredits = 1.0
         let faceTrackCredits = effectiveFaceTrack ? max(1.0, minutes) : 0
         let total = max(2.0, renderCredits + transcriptionCredits + analysisCredits + faceTrackCredits)
@@ -138,7 +142,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     }
 
     var resultPreviewURL: URL? {
-        outputURL
+        outputURL ?? outputRemoteURL
     }
 
     var hasResult: Bool {
@@ -173,9 +177,6 @@ final class ViralCaptionsViewModel: ObservableObject {
         isCheckingQuota = true
         do {
             let quota = try await client.quota()
-            guard quota.aiCredits.allowed else {
-                throw SubclipAPIError(message: "This account does not have enough AI credits.")
-            }
             quotaInfo = quota
         } catch {
             // Quota refresh runs in the background and must never interrupt an
@@ -297,7 +298,22 @@ final class ViralCaptionsViewModel: ObservableObject {
         guard canRender else { return }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
-            await self?.runRender()
+            guard let self else { return }
+            await self.refreshQuota()
+            guard !Task.isCancelled else { return }
+
+            if let required = self.previewEstimatedCredits,
+               let available = self.quotaInfo?.aiCredits.balance,
+               available + 0.0001 < required {
+                self.phase = .idle
+                self.progress = 0
+                self.statusMessage = "Choose a pass to add AI credits before exporting."
+                self.alert = nil
+                self.passRequiredPaywallRequestID = UUID()
+                return
+            }
+
+            await self.runRender()
         }
     }
 
@@ -468,6 +484,30 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
     }
 
+    private func prepareLocalTranscriptIfNeeded(for video: SelectedVideo) async throws {
+        guard selectedSRT == nil else { return }
+        guard localTranscriptionSupported else {
+            throw SubclipAPIError(message: "Local transcription is not available for the selected language on this device.")
+        }
+
+        isTranscribing = true
+        transcriptionProgress = 0.02
+        transcriptionStatus = "Preparing captions locally"
+        defer { isTranscribing = false }
+
+        let transcript = try await LocalSpeechTranscriber.transcribeVideo(
+            at: video.url,
+            languageCode: selectedLanguage
+        ) { [weak self] progress, status in
+            self?.transcriptionProgress = progress
+            self?.transcriptionStatus = status
+        }
+        try Task.checkCancellation()
+        try await setSRTText(transcript.srtText, fileName: defaultSRTFileName(for: video.fileName))
+        transcriptionProgress = 1
+        transcriptionStatus = "Transcript ready"
+    }
+
     private func runRender() async {
         guard let selectedVideo else { return }
         guard auth.isAuthenticated else {
@@ -476,6 +516,13 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
 
         do {
+            if selectedSRT == nil {
+                phase = .readingMedia
+                progress = 0.03
+                statusMessage = "Transcribing audio locally…"
+                try await prepareLocalTranscriptIfNeeded(for: selectedVideo)
+            }
+
             outputCacheTask?.cancel()
             outputCacheTask = nil
             outputURL = nil
@@ -495,7 +542,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             statusMessage = "Creating secure upload URLs..."
             let shouldDeclareDimensions = selectedVideo.metadata.inferredAspectRatio != aspectRatio
 
-            let srtForRender = autoTranscribe ? nil : selectedSRT
+            let srtForRender = selectedSRT
             let uploadPayload = CreateUploadRequest(
                 projectName: selectedVideo.fileName.replacingOccurrences(of: ".\(selectedVideo.url.pathExtension)", with: ""),
                 video: .init(
@@ -607,7 +654,17 @@ final class ViralCaptionsViewModel: ObservableObject {
                 statusMessage = "Render complete. Choose a pass to download or share."
                 updateQueueItem(projectId: projectId ?? "", status: "Ready — pass required")
                 alert = nil
-                passRequiredPaywallRequestID = UUID()
+                if let projectId {
+                    do {
+                        let preview = try await client.previewInfo(projectId: projectId)
+                        outputRemoteURL = preview.downloadUrl
+                        outputSuggestedFileName = preview.fileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
+                        outputFileSize = preview.fileSize
+                        resultAspectRatio = aspectRatio
+                    } catch {
+                        alert = AppMessage(title: "Preview unavailable", message: error.localizedDescription)
+                    }
+                }
                 return
             }
             phase = .failed
@@ -786,8 +843,12 @@ final class ViralCaptionsViewModel: ObservableObject {
     }
 
     func openHistoryItem(_ item: LocalUploadQueueItem) async -> Bool {
-        guard item.isDownloadAvailable else {
-            alert = AppMessage(title: "Download expired", message: "This history item is past the 58-minute download window.")
+        guard !isOpeningHistoryPreview else { return false }
+        isOpeningHistoryPreview = true
+        defer { isOpeningHistoryPreview = false }
+
+        guard item.isResultReady else {
+            alert = AppMessage(title: "Result unavailable", message: "This render has not completed successfully.")
             return false
         }
 
@@ -795,6 +856,16 @@ final class ViralCaptionsViewModel: ObservableObject {
             alert = AppMessage(title: "Sign in required", message: "Sign in to refresh this download.")
             return false
         }
+
+        outputCacheTask?.cancel()
+        outputCacheTask = nil
+        outputURL = nil
+        outputRemoteURL = nil
+        outputDownloadProgress = nil
+        projectId = item.projectId
+        resultAspectRatio = OutputAspectRatio(rawValue: item.aspectRatio) ?? .vertical
+        phase = .completed
+        statusMessage = "Loading preview…"
 
         let cachedFileName = item.outputFileName ?? "captioned-video.mp4"
         if let cachedURL = client.cachedOutputFileURL(
@@ -830,7 +901,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
 
         do {
-            let info = try await client.downloadInfo(projectId: item.projectId)
+            let info = try await client.previewInfo(projectId: item.projectId)
             let fileName = info.fileName ?? item.outputFileName ?? "captioned-video.mp4"
             if let cachedURL = client.cachedOutputFileURL(
                 suggestedFileName: fileName,
@@ -886,7 +957,6 @@ final class ViralCaptionsViewModel: ObservableObject {
                 downloadExpiresAt: outputDownloadExpiresAt,
                 cachedOutputExpiresAt: item.cachedOutputExpiresAt
             )
-            cacheCurrentOutput()
             return true
         } catch {
             alert = AppMessage(title: "Could not open history item", message: error.localizedDescription)
