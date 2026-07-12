@@ -36,22 +36,23 @@ struct LoginGateView: View {
 
     var body: some View {
         GeometryReader { proxy in
+            let isPortraitPad = proxy.size.width >= 700 && proxy.size.height > proxy.size.width
             ZStack {
                 entryBackground
 
                 ScrollView {
-                    VStack(spacing: proxy.size.height < 700 ? 20 : 30) {
+                    VStack(spacing: isPortraitPad ? 38 : (proxy.size.height < 700 ? 20 : 30)) {
                         VStack(spacing: 14) {
-                            SubclipAppMark(size: proxy.size.width < 390 ? 68 : 82)
+                            SubclipAppMark(size: isPortraitPad ? 104 : (proxy.size.width < 390 ? 68 : 82))
                             Text("Create captions people stop for")
-                                .font(.system(size: proxy.size.width < 390 ? 25 : 31, weight: .bold, design: .rounded))
+                                .font(.system(size: isPortraitPad ? 38 : (proxy.size.width < 390 ? 25 : 31), weight: .bold, design: .rounded))
                                 .foregroundStyle(Brand.ink)
                                 .multilineTextAlignment(.center)
                             Text("Sign in to render, save and manage your captioned videos securely.")
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.system(size: isPortraitPad ? 17 : 14, weight: .medium))
                                 .foregroundStyle(Brand.muted)
                                 .multilineTextAlignment(.center)
-                                .frame(maxWidth: 430)
+                                .frame(maxWidth: isPortraitPad ? 560 : 430)
                         }
 
                         VStack(spacing: 14) {
@@ -89,20 +90,23 @@ struct LoginGateView: View {
                                     .padding(.top, 2)
                             }
                         }
-                        .padding(proxy.size.width < 390 ? 18 : 24)
+                        .padding(isPortraitPad ? 32 : (proxy.size.width < 390 ? 18 : 24))
                         .background(Brand.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: 24, style: .continuous)
                                 .stroke(Brand.line, lineWidth: 1)
                         }
                         .shadow(color: .black.opacity(0.07), radius: 24, y: 12)
-                        .frame(maxWidth: 500)
+                        .frame(maxWidth: isPortraitPad ? 660 : 500)
 
-                        Label("Your session is encrypted and stored in Keychain", systemImage: "lock.shield.fill")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Brand.muted)
                     }
-                    .frame(maxWidth: .infinity)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: isPortraitPad
+                            ? max(0, proxy.size.height - proxy.safeAreaInsets.top - proxy.safeAreaInsets.bottom - 48)
+                            : nil,
+                        alignment: .center
+                    )
                     .padding(.horizontal, 18)
                     .padding(.top, max(24, proxy.safeAreaInsets.top + 12))
                     .padding(.bottom, max(24, proxy.safeAreaInsets.bottom + 16))
@@ -204,13 +208,18 @@ struct LoginGateView: View {
                         .stroke(focusedField == .code ? Brand.navy.opacity(0.65) : Brand.line, lineWidth: focusedField == .code ? 1.5 : 1)
                 }
                 #if os(iOS)
-                .keyboardType(.numberPad)
+                .keyboardType(.asciiCapableNumberPad)
                 #endif
+                .onChange(of: auth.verificationCode) { _, newValue in
+                    auth.verificationCode = normalizedOTP(newValue)
+                }
 
-            Button {
-                focusedField = nil
-                Task { await auth.verifyEmail() }
-            } label: {
+                Button {
+                    Task {
+                        focusedField = nil
+                        await verifyEmailFromGate()
+                    }
+                } label: {
                 HStack {
                     if auth.isLoading { ProgressView().tint(.white) }
                     Text(auth.isLoading ? "Verifying…" : "Verify Email")
@@ -225,7 +234,11 @@ struct LoginGateView: View {
             .disabled(auth.isLoading || auth.verificationCode.filter(\.isNumber).count != 6)
 
             Button("Send a new code") {
-                Task { await auth.resendVerificationCode() }
+                Task {
+                    focusedField = nil
+                    try? await Task.sleep(for: .milliseconds(350))
+                    await auth.resendVerificationCode()
+                }
             }
             .font(.system(size: 13, weight: .bold))
             .buttonStyle(.plain)
@@ -239,6 +252,25 @@ struct LoginGateView: View {
         focusedField = nil
         Task { await auth.submit() }
     }
+
+    private func verifyEmailFromGate() async {
+        await MainActor.run {
+            focusedField = nil
+        }
+        // Give SwiftUI time to finish its focus transaction before a successful
+        // verification replaces this form. This avoids tearing down the field
+        // while the system keyboard is still attached to it.
+        try? await Task.sleep(for: .milliseconds(450))
+        await auth.verifyEmail()
+    }
+
+    private func normalizedOTP(_ value: String) -> String {
+        String(value.unicodeScalars
+            .filter { CharacterSet.decimalDigits.contains($0) && $0.isASCII }
+            .prefix(6)
+            .map(Character.init))
+    }
+
 }
 
 private struct PasswordResetSheet: View {

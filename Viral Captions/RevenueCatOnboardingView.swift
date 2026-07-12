@@ -8,6 +8,14 @@ struct RevenueCatOnboardingView: View {
 
     @State private var selectedPackageID: String?
 
+    private struct PlanDetails {
+        let name: String
+        let credits: String
+        let billing: String
+        let badge: String?
+        let rank: Int
+    }
+
     private var packages: [Package] {
         store.offering?.availablePackages.sorted { lhs, rhs in
             rank(lhs.identifier) < rank(rhs.identifier)
@@ -53,7 +61,7 @@ struct RevenueCatOnboardingView: View {
         }
         .onChange(of: packages.map(\.identifier)) { _, identifiers in
             if selectedPackageID == nil {
-                selectedPackageID = identifiers.first
+                selectedPackageID = identifiers.first(where: { $0.contains("lifetime") }) ?? identifiers.first
             }
         }
     }
@@ -71,7 +79,7 @@ struct RevenueCatOnboardingView: View {
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
 
-            Text("Choose a monthly plan to render polished, captioned videos on iPhone and iPad.")
+            Text("Pay once. Pick the access window that fits your next project—no recurring billing.")
                 .font(.system(.body, design: .rounded))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -129,7 +137,7 @@ struct RevenueCatOnboardingView: View {
 
     private func planCard(_ package: Package) -> some View {
         let selected = selectedPackage?.identifier == package.identifier
-        let studio = package.identifier.contains("studio")
+        let details = planDetails(for: package)
         return Button {
             withAnimation(.snappy(duration: 0.2)) {
                 selectedPackageID = package.identifier
@@ -142,10 +150,10 @@ struct RevenueCatOnboardingView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        Text(studio ? "Studio" : "Creator")
+                        Text(details.name)
                             .font(.headline)
-                        if studio {
-                            Text("BEST VALUE")
+                        if let badge = details.badge {
+                            Text(badge)
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 8)
@@ -153,7 +161,7 @@ struct RevenueCatOnboardingView: View {
                                 .background(Color.accentColor, in: Capsule())
                         }
                     }
-                    Text(studio ? "3,000 AI credits every month" : "600 AI credits every month")
+                    Text(details.credits)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -163,7 +171,7 @@ struct RevenueCatOnboardingView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     Text(package.storeProduct.localizedPriceString)
                         .font(.headline)
-                    Text("per month")
+                    Text(details.billing)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -177,7 +185,7 @@ struct RevenueCatOnboardingView: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(studio ? "Studio" : "Creator"), \(package.storeProduct.localizedPriceString) per month")
+        .accessibilityLabel("\(details.name), \(package.storeProduct.localizedPriceString), \(details.billing)")
     }
 
     private var purchaseButton: some View {
@@ -213,7 +221,7 @@ struct RevenueCatOnboardingView: View {
             Button("Restore Purchases") { Task { _ = await store.restore() } }
                 .font(.subheadline.weight(.semibold))
 
-            Text("Payment is charged to your Apple ID. Your subscription renews automatically unless cancelled at least 24 hours before the end of the current period.")
+            Text("All passes are one-time purchases charged to your Apple ID. Credits roll over and remain available. Timed access ends after the selected period; purchase another pass to export, download or share again. Lifetime access does not expire.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -229,7 +237,48 @@ struct RevenueCatOnboardingView: View {
     }
 
     private func rank(_ identifier: String) -> Int {
-        identifier.contains("creator") ? 0 : 1
+        planDetails(identifier: identifier).rank
+    }
+
+    private func planDetails(for package: Package) -> PlanDetails {
+        planDetails(identifier: package.identifier)
+    }
+
+    private func planDetails(identifier: String) -> PlanDetails {
+        if identifier.contains("day_pass") {
+            return PlanDetails(
+                name: "Day Pass",
+                credits: "50 AI credits · access for 24 hours",
+                billing: "one-time",
+                badge: "QUICK START",
+                rank: 0
+            )
+        }
+        if identifier.contains("lifetime") {
+            return PlanDetails(
+                name: "Lifetime Pass",
+                credits: "1,000 AI credits · app access never expires",
+                billing: "one-time",
+                badge: "BEST VALUE",
+                rank: 1
+            )
+        }
+        if identifier.contains("7_day") {
+            return PlanDetails(
+                name: "7-Day Pass",
+                credits: "300 AI credits · access for 7 days",
+                billing: "one-time",
+                badge: "FLEXIBLE",
+                rank: 2
+            )
+        }
+        return PlanDetails(
+            name: "30-Day Pass",
+            credits: "300 AI credits · access for 30 days",
+            billing: "one-time",
+            badge: "MORE TIME",
+            rank: 3
+        )
     }
 }
 #endif

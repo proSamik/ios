@@ -79,8 +79,11 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var quotaInfo: QuotaResponse?
     @Published var isOutputCaching = false
     @Published var outputDownloadProgress: Double?
+    @Published var lowCreditsPaywallRequestID: UUID?
+    @Published var passRequiredPaywallRequestID: UUID?
 
     private let client: SubclipAPIClient
+    private let localOutputCacheDuration: TimeInterval = 3600
     private var authObservation: AnyCancellable?
     private var pollTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
@@ -111,6 +114,19 @@ final class ViralCaptionsViewModel: ObservableObject {
             && selectedVideo != nil
             && (autoTranscribe || selectedSRT != nil)
             && !isRendering
+    }
+
+    /// Mirrors the server's Dynamic Captions credit calculation so the cost is
+    /// visible before the upload starts. The server remains authoritative.
+    var previewEstimatedCredits: Double? {
+        guard let durationSeconds = selectedVideo?.metadata.durationSeconds else { return nil }
+        let minutes = max(1.0 / 60.0, max(0, durationSeconds) / 60.0)
+        let renderCredits = minutes
+        let transcriptionCredits = 1.0
+        let analysisCredits = 1.0
+        let faceTrackCredits = effectiveFaceTrack ? max(1.0, minutes) : 0
+        let total = max(2.0, renderCredits + transcriptionCredits + analysisCredits + faceTrackCredits)
+        return (total * 100).rounded() / 100
     }
 
     var needsAuthentication: Bool {
@@ -162,14 +178,30 @@ final class ViralCaptionsViewModel: ObservableObject {
             }
             quotaInfo = quota
         } catch {
-            quotaInfo = nil
-            alert = AppMessage(title: "Could not check account", message: error.localizedDescription)
+            // Quota refresh runs in the background and must never interrupt an
+            // upload/render with a transient network alert. Keep the last known
+            // value; the actual job endpoint remains the source of truth.
+            print("Background quota refresh failed: \(error.localizedDescription)")
         }
         isCheckingQuota = false
     }
 
     func billingAccess() async throws -> BillingAccessResponse {
         try await client.billingAccess()
+    }
+
+    func bootstrapMobileAccount() async {
+        guard auth.isAuthenticated else { return }
+        do {
+            let shouldGrant = auth.shouldClaimIOSWelcomeCredits
+            let response = try await client.bootstrapMobileAccount(grantWelcomeCredits: shouldGrant)
+            if response.success && shouldGrant {
+                auth.markIOSWelcomeCreditsClaimed()
+            }
+        } catch {
+            // Provisioning is retried the next time the authenticated view appears.
+            print("Mobile account bootstrap failed: \(error.localizedDescription)")
+        }
     }
 
     func importVideo(from url: URL, alreadyLocal: Bool = false) {
@@ -565,13 +597,66 @@ final class ViralCaptionsViewModel: ObservableObject {
                 updateQueueItem(projectId: projectId, status: "Canceled")
             }
         } catch {
+            if let apiError = error as? SubclipAPIError,
+               apiError.code == "pass_required" {
+                // Rendering has completed; only access to its protected result
+                // is pending. Preserve the project and offer a pass instead of
+                // incorrectly marking the cloud render as failed.
+                phase = .completed
+                progress = 1
+                statusMessage = "Render complete. Choose a pass to download or share."
+                updateQueueItem(projectId: projectId ?? "", status: "Ready — pass required")
+                alert = nil
+                passRequiredPaywallRequestID = UUID()
+                return
+            }
             phase = .failed
             statusMessage = "Render failed."
             if let projectId {
                 updateQueueItem(projectId: projectId, status: "Failed")
             }
             alert = AppMessage(title: "Render failed", message: error.localizedDescription)
+            if let apiError = error as? SubclipAPIError,
+               apiError.code == "not_enough_credits" {
+                lowCreditsPaywallRequestID = UUID()
+            }
         }
+    }
+
+    func resumePreparedResultAfterPurchase() async {
+        guard let projectId else { return }
+        for attempt in 0..<6 {
+            do {
+                let info = try await client.downloadInfo(projectId: projectId)
+                outputRemoteURL = info.downloadUrl
+                outputSuggestedFileName = info.fileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
+                outputDownloadExpiresAt = downloadExpiryDate(from: info)
+                outputFileSize = info.fileSize
+                resultAspectRatio = aspectRatio
+                phase = .completed
+                progress = 1
+                statusMessage = "Ready to download."
+                updateQueueItem(
+                    projectId: projectId,
+                    status: "Completed",
+                    outputFileName: outputSuggestedFileName,
+                    outputFileSize: info.fileSize,
+                    creditsUsed: creditsUsed,
+                    downloadExpiresAt: outputDownloadExpiresAt
+                )
+                cacheCurrentOutput()
+                return
+            } catch let error as SubclipAPIError where error.code == "pass_required" && attempt < 5 {
+                try? await Task.sleep(for: .seconds(attempt + 1))
+            } catch {
+                alert = AppMessage(title: "Could not open result", message: error.localizedDescription)
+                return
+            }
+        }
+        alert = AppMessage(
+            title: "Pass is still syncing",
+            message: "Your purchase succeeded. Please tap Open Result again in a moment."
+        )
     }
 
     func saveOutputCopy(to destination: URL) {
@@ -638,9 +723,34 @@ final class ViralCaptionsViewModel: ObservableObject {
                 isOutputCaching = true
             }
             outputDownloadProgress = 0
+            let outputFileName = outputSuggestedFileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
+            let cachedItem = projectId.flatMap { queueItem(for: $0) }
+            if let projectId,
+               let cachedURL = client.cachedOutputFileURL(
+                suggestedFileName: outputFileName,
+                projectId: projectId,
+                expectedSize: outputFileSize,
+                cacheExpiresAt: cachedItem?.cachedOutputExpiresAt
+            ) {
+                outputURL = cachedURL
+                outputDownloadProgress = 1
+                isOutputCaching = false
+                if updatesStatus {
+                    phase = .completed
+                    statusMessage = "Using cached export."
+                }
+                updateCacheState(
+                    for: projectId,
+                    outputFileName: outputFileName,
+                    outputFileSize: outputFileSize
+                )
+                return cachedURL
+            }
+
             let localURL = try await client.downloadFile(
                 from: outputRemoteURL,
-                suggestedFileName: outputSuggestedFileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
+                suggestedFileName: outputFileName,
+                projectId: projectId
             ) { [weak self] progress in
                 self?.outputDownloadProgress = progress
             }
@@ -648,6 +758,9 @@ final class ViralCaptionsViewModel: ObservableObject {
             outputDownloadProgress = 1
             outputCacheTask = nil
             isOutputCaching = false
+            if let projectId {
+                markOutputCached(for: projectId, outputFileName: outputFileName, outputFileSize: outputFileSize)
+            }
             if updatesStatus {
                 phase = .completed
                 statusMessage = "Downloaded."
@@ -683,9 +796,74 @@ final class ViralCaptionsViewModel: ObservableObject {
             return false
         }
 
+        let cachedFileName = item.outputFileName ?? "captioned-video.mp4"
+        if let cachedURL = client.cachedOutputFileURL(
+            suggestedFileName: cachedFileName,
+            projectId: item.projectId,
+            expectedSize: item.outputFileSize,
+            cacheExpiresAt: item.cachedOutputExpiresAt
+        ) {
+            outputCacheTask?.cancel()
+            outputCacheTask = nil
+            outputURL = cachedURL
+            outputRemoteURL = nil
+            outputSuggestedFileName = cachedFileName
+            outputFileSize = item.outputFileSize
+            outputDownloadExpiresAt = item.downloadExpiresAt
+            resultAspectRatio = OutputAspectRatio(rawValue: item.aspectRatio) ?? .vertical
+            projectId = item.projectId
+            phase = .completed
+            progress = 1
+            statusMessage = "Ready to download."
+            creditsUsed = item.creditsUsed
+            outputDownloadProgress = 1
+            updateQueueItem(
+                projectId: item.projectId,
+                status: "Completed",
+                outputFileName: cachedFileName,
+                outputFileSize: item.outputFileSize,
+                creditsUsed: item.creditsUsed,
+                downloadExpiresAt: item.downloadExpiresAt,
+                cachedOutputExpiresAt: item.cachedOutputExpiresAt ?? localOutputCacheExpirationDate()
+            )
+            return true
+        }
+
         do {
             let info = try await client.downloadInfo(projectId: item.projectId)
             let fileName = info.fileName ?? item.outputFileName ?? "captioned-video.mp4"
+            if let cachedURL = client.cachedOutputFileURL(
+                suggestedFileName: fileName,
+                projectId: item.projectId,
+                expectedSize: info.fileSize,
+                cacheExpiresAt: item.cachedOutputExpiresAt
+            ) {
+                outputCacheTask?.cancel()
+                outputCacheTask = nil
+                outputURL = cachedURL
+                outputRemoteURL = info.downloadUrl
+                outputSuggestedFileName = fileName
+                outputFileSize = info.fileSize
+                outputDownloadExpiresAt = downloadExpiryDate(from: info)
+                resultAspectRatio = OutputAspectRatio(rawValue: item.aspectRatio) ?? .vertical
+                projectId = item.projectId
+                phase = .completed
+                progress = 1
+                statusMessage = "Ready to download."
+                creditsUsed = item.creditsUsed
+                outputDownloadProgress = 1
+                updateQueueItem(
+                    projectId: item.projectId,
+                    status: "Completed",
+                    outputFileName: fileName,
+                    outputFileSize: info.fileSize,
+                    creditsUsed: item.creditsUsed,
+                    downloadExpiresAt: downloadExpiryDate(from: info),
+                    cachedOutputExpiresAt: item.cachedOutputExpiresAt ?? localOutputCacheExpirationDate()
+                )
+                return true
+            }
+
             outputCacheTask?.cancel()
             outputCacheTask = nil
             outputURL = nil
@@ -705,7 +883,8 @@ final class ViralCaptionsViewModel: ObservableObject {
                 outputFileName: fileName,
                 outputFileSize: info.fileSize,
                 creditsUsed: item.creditsUsed,
-                downloadExpiresAt: outputDownloadExpiresAt
+                downloadExpiresAt: outputDownloadExpiresAt,
+                cachedOutputExpiresAt: item.cachedOutputExpiresAt
             )
             cacheCurrentOutput()
             return true
@@ -827,7 +1006,8 @@ final class ViralCaptionsViewModel: ObservableObject {
         outputFileName: String? = nil,
         outputFileSize: Int64? = nil,
         creditsUsed: Double? = nil,
-        downloadExpiresAt: Date? = nil
+        downloadExpiresAt: Date? = nil,
+        cachedOutputExpiresAt: Date? = nil
     ) {
         guard let index = uploadQueue.firstIndex(where: { $0.projectId == projectId }) else { return }
         uploadQueue[index].status = status
@@ -843,7 +1023,40 @@ final class ViralCaptionsViewModel: ObservableObject {
         if let downloadExpiresAt {
             uploadQueue[index].downloadExpiresAt = downloadExpiresAt
         }
+        if let cachedOutputExpiresAt {
+            uploadQueue[index].cachedOutputExpiresAt = cachedOutputExpiresAt
+        }
         LocalUploadQueueStore.save(uploadQueue)
+    }
+
+    private func localOutputCacheExpirationDate(from baseDate: Date = Date()) -> Date {
+        baseDate.addingTimeInterval(localOutputCacheDuration)
+    }
+
+    private func markOutputCached(
+        for projectId: String,
+        outputFileName: String,
+        outputFileSize: Int64?
+    ) {
+        updateQueueItem(
+            projectId: projectId,
+            status: "Completed",
+            outputFileName: outputFileName,
+            outputFileSize: outputFileSize,
+            cachedOutputExpiresAt: localOutputCacheExpirationDate()
+        )
+    }
+
+    private func updateCacheState(
+        for projectId: String,
+        outputFileName: String,
+        outputFileSize: Int64?
+    ) {
+        markOutputCached(for: projectId, outputFileName: outputFileName, outputFileSize: outputFileSize)
+    }
+
+    private func queueItem(for projectId: String) -> LocalUploadQueueItem? {
+        uploadQueue.first(where: { $0.projectId == projectId })
     }
 
     private func downloadExpiryDate(from info: DownloadInfoResponse) -> Date {

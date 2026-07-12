@@ -48,14 +48,13 @@ private final class DownloadOperation: NSObject, URLSessionDownloadDelegate, @un
             self.continuation = continuation
             lock.unlock()
 
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            let configuration = URLSessionConfiguration.default
             configuration.timeoutIntervalForRequest = 90
             configuration.timeoutIntervalForResource = 10 * 60
             configuration.waitsForConnectivity = true
             configuration.allowsConstrainedNetworkAccess = true
             configuration.allowsExpensiveNetworkAccess = true
-            configuration.httpMaximumConnectionsPerHost = 4
+            configuration.httpMaximumConnectionsPerHost = 6
             configuration.networkServiceType = .responsiveData
 
             let queue = OperationQueue()
@@ -70,6 +69,7 @@ private final class DownloadOperation: NSObject, URLSessionDownloadDelegate, @un
             request.setValue("video/mp4,video/*;q=0.9,*/*;q=0.5", forHTTPHeaderField: "Accept")
 
             let task = session.downloadTask(with: request)
+            task.priority = URLSessionTask.highPriority
             lock.lock()
             self.session = session
             self.task = task

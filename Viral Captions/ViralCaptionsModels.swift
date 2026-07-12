@@ -301,6 +301,7 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
     var outputFileSize: Int64?
     var creditsUsed: Double?
     var downloadExpiresAt: Date?
+    var cachedOutputExpiresAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -313,7 +314,8 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
         outputFileName: String? = nil,
         outputFileSize: Int64? = nil,
         creditsUsed: Double? = nil,
-        downloadExpiresAt: Date? = nil
+        downloadExpiresAt: Date? = nil,
+        cachedOutputExpiresAt: Date? = nil
     ) {
         self.id = id
         self.projectId = projectId
@@ -326,14 +328,29 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
         self.outputFileSize = outputFileSize
         self.creditsUsed = creditsUsed
         self.downloadExpiresAt = downloadExpiresAt
+        self.cachedOutputExpiresAt = cachedOutputExpiresAt
     }
 
     var isDownloadAvailable: Bool {
-        guard status == "Completed", let downloadExpiresAt else { return false }
+        guard status == "Completed" else { return false }
+        if let localCacheExpiry = cachedOutputExpiresAt, Date() < localCacheExpiry {
+            return true
+        }
+        guard let downloadExpiresAt else { return false }
         return Date() < downloadExpiresAt
     }
 
+    var isCachedOutputStillAvailable: Bool {
+        guard let localCacheExpiry = cachedOutputExpiresAt else { return false }
+        return Date() < localCacheExpiry
+    }
+
     var downloadTimeRemainingLabel: String? {
+        if isCachedOutputStillAvailable, let cachedOutputExpiresAt {
+            let remaining = max(0, Int(cachedOutputExpiresAt.timeIntervalSinceNow / 60))
+            if remaining > 0 { return "Cached \(remaining)m" }
+            return "Cache expired"
+        }
         guard let downloadExpiresAt else { return nil }
         let remaining = max(0, Int(downloadExpiresAt.timeIntervalSinceNow / 60))
         if remaining <= 0 { return "Expired" }

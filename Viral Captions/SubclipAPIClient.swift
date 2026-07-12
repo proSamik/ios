@@ -59,6 +59,15 @@ struct SubclipAPIClient {
         )
     }
 
+    func bootstrapMobileAccount(grantWelcomeCredits: Bool) async throws -> MobileBootstrapResponse {
+        try await jsonRequest(
+            path: "/api/v1/mobile/bootstrap",
+            method: "POST",
+            body: MobileBootstrapRequest(grantWelcomeCredits: grantWelcomeCredits),
+            responseType: MobileBootstrapResponse.self
+        )
+    }
+
     func uploadFile(
         fileURL: URL,
         uploadURL: URL,
@@ -78,11 +87,10 @@ struct SubclipAPIClient {
     func downloadFile(
         from remoteURL: URL,
         suggestedFileName: String,
+        projectId: String? = nil,
         progress: @MainActor @escaping @Sendable (Double?) -> Void
     ) async throws -> URL {
-        let directory = try outputDirectory()
-        let fileName = sanitizedFileName(suggestedFileName, fallback: "captioned-video.mp4")
-        let destination = directory.appendingPathComponent(fileName)
+        let destination = try outputFileURL(suggestedFileName: suggestedFileName, projectId: projectId)
         return try await FastMediaDownloader.download(
             from: remoteURL,
             to: destination,
@@ -90,11 +98,42 @@ struct SubclipAPIClient {
         )
     }
 
+    func cachedOutputFileURL(
+        suggestedFileName: String,
+        projectId: String? = nil,
+        expectedSize: Int64?,
+        cacheExpiresAt: Date? = nil
+    ) -> URL? {
+        if let cacheExpiresAt, Date() >= cacheExpiresAt {
+            return nil
+        }
+        do {
+            let destination = try outputFileURL(suggestedFileName: suggestedFileName, projectId: projectId)
+            let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+            guard let size = attributes[.size] as? Int64, size > 0 else { return nil }
+            if let expectedSize, expectedSize > 0, size != expectedSize { return nil }
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    func outputFileURL(
+        suggestedFileName: String,
+        projectId: String?
+    ) throws -> URL {
+        let directory = try outputDirectory()
+        let safeFileName = sanitizedFileName(suggestedFileName, fallback: "captioned-video.mp4")
+        let safeProjectId = sanitizedFileName(projectId ?? "", fallback: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName = safeProjectId.isEmpty ? safeFileName : "\(safeProjectId)_\(safeFileName)"
+        return directory.appendingPathComponent(fileName)
+    }
+
     private func outputDirectory() throws -> URL {
         let fileManager = FileManager.default
-        let base = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first
+        let base = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
             ?? fileManager.temporaryDirectory
-        let directory = base.appendingPathComponent("Viral Captions", isDirectory: true)
+        let directory = base.appendingPathComponent("ViralCaptionsDownloads", isDirectory: true)
         if !fileManager.fileExists(atPath: directory.path) {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
@@ -278,6 +317,21 @@ struct BillingAccessResponse: Decodable, Equatable {
     let status: String
     let source: String
     let hasPolarAccess: Bool
+    let hasRevenueCatAccess: Bool
     let shouldShowRevenueCat: Bool
+    let hasPreviousPass: Bool
+    let revenueCatExpiresAt: String?
+    let revenueCatLifetime: Bool?
+    let creditsRollover: Bool?
     let message: String?
+}
+
+private struct MobileBootstrapRequest: Encodable {
+    let grantWelcomeCredits: Bool
+}
+
+struct MobileBootstrapResponse: Decodable, Equatable {
+    let success: Bool
+    let welcomeCredits: Double
+    let welcomeCreditsGranted: Bool
 }

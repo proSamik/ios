@@ -7,6 +7,7 @@ import RevenueCat
 final class RevenueCatStore: ObservableObject {
     @Published private(set) var offering: Offering?
     @Published private(set) var hasPremium = false
+    @Published private(set) var creditBalance: Double = 0
     @Published private(set) var isLoading = false
     @Published private(set) var isConfigured = false
     @Published var errorMessage: String?
@@ -51,11 +52,12 @@ final class RevenueCatStore: ObservableObject {
         do {
             async let customerInfo = Purchases.shared.customerInfo()
             async let offerings = Purchases.shared.offerings()
-            let (info, availableOfferings) = try await (customerInfo, offerings)
-            apply(info)
+            async let virtualCurrencies = Purchases.shared.virtualCurrencies()
+            let (info, availableOfferings, currencies) = try await (customerInfo, offerings, virtualCurrencies)
+            apply(info, currencies: currencies)
             offering = availableOfferings.current
             if offering == nil {
-                errorMessage = "Subscriptions are temporarily unavailable. Please try again shortly."
+                errorMessage = "Passes are temporarily unavailable. Please try again shortly."
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -69,8 +71,11 @@ final class RevenueCatStore: ObservableObject {
 
         do {
             let result = try await Purchases.shared.purchase(package: package)
-            apply(result.customerInfo)
-            return hasPremium
+            Purchases.shared.invalidateVirtualCurrenciesCache()
+            let currencies = try await Purchases.shared.virtualCurrencies()
+            apply(result.customerInfo, currencies: currencies)
+            hasPremium = true
+            return true
         } catch ErrorCode.purchaseCancelledError {
             return false
         } catch {
@@ -86,9 +91,14 @@ final class RevenueCatStore: ObservableObject {
 
         do {
             let info = try await Purchases.shared.restorePurchases()
-            apply(info)
+            Purchases.shared.invalidateVirtualCurrenciesCache()
+            let currencies = try await Purchases.shared.virtualCurrencies()
+            apply(info, currencies: currencies)
+            let restoredProduct = info.entitlements[Self.entitlementID]?.productIdentifier
+            hasPremium = restoredProduct == "app.subclip.viralcaptions.lifetimepass"
+                || restoredProduct == "subclip_lifetime_pass"
             if !hasPremium {
-                errorMessage = "No active Subclip subscription was found for this Apple ID."
+                errorMessage = "No restorable Subclip pass was found for this Apple ID."
             }
             return hasPremium
         } catch {
@@ -100,13 +110,25 @@ final class RevenueCatStore: ObservableObject {
     func reset() {
         offering = nil
         hasPremium = false
+        creditBalance = 0
         errorMessage = nil
         configuredUserID = nil
         isConfigured = false
     }
 
-    private func apply(_ info: CustomerInfo) {
-        hasPremium = info.entitlements[Self.entitlementID]?.isActive == true
+    func lockAccess() {
+        hasPremium = false
+    }
+
+    func markPurchaseCompleted() {
+        hasPremium = true
+        Task { await refresh() }
+    }
+
+    private func apply(_ info: CustomerInfo, currencies: VirtualCurrencies) {
+        let creditUnits = ["DAYCRED", "WEEKCRED", "MONTHCRED", "LIFECRED"]
+            .reduce(0) { total, code in total + (currencies[code]?.balance ?? 0) }
+        creditBalance = Double(creditUnits) / 100
     }
 }
 #endif

@@ -1,0 +1,4 @@
+# Xcode build artifacts
+build_tmp/
+build/
+DerivedData/

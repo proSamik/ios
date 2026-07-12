@@ -5,6 +5,7 @@ import Foundation
 
 @MainActor
 final class BetterAuthStore: ObservableObject {
+    private static let pendingIOSWelcomeEmailKey = "pendingIOSWelcomeCreditsEmail"
     enum Mode: String, CaseIterable, Identifiable {
         case signIn = "Sign In"
         case signUp = "Create Account"
@@ -76,7 +77,7 @@ final class BetterAuthStore: ObservableObject {
                 _ = try await client.signIn.email(
                     with: .init(email: normalizedEmail, password: password, rememberMe: true)
                 )
-                await client.session.refreshSession()
+                await waitForSessionRefresh(expectAuthenticatedSession: true)
                 needsVerification = false
             case .signUp:
                 let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,11 +93,15 @@ final class BetterAuthStore: ObservableObject {
                         rememberMe: true
                     )
                 )
+                UserDefaults.standard.set(
+                    normalizedEmail,
+                    forKey: Self.pendingIOSWelcomeEmailKey
+                )
                 needsVerification = response.data.token == nil || !response.data.user.emailVerified
                 if needsVerification {
                     message = "We sent a 6-digit verification code to \(normalizedEmail)."
                 } else {
-                    await client.session.refreshSession()
+                    await waitForSessionRefresh(expectAuthenticatedSession: true)
                 }
             }
         } catch {
@@ -111,26 +116,56 @@ final class BetterAuthStore: ObservableObject {
         }
     }
 
+    var shouldClaimIOSWelcomeCredits: Bool {
+        guard let sessionEmail = session?.user.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              let pendingEmail = UserDefaults.standard.string(forKey: Self.pendingIOSWelcomeEmailKey)
+        else { return false }
+        return sessionEmail == pendingEmail
+    }
+
+    func markIOSWelcomeCreditsClaimed() {
+        UserDefaults.standard.removeObject(forKey: Self.pendingIOSWelcomeEmailKey)
+    }
+
     func verifyEmail() async {
         let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let code = verificationCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Better Auth's email-OTP API explicitly expects a JSON string. Keep it
+        // as a string so codes such as "012345" do not lose their leading zero,
+        // while stripping spaces/dashes introduced by OTP autofill or pasting.
+        let code = verificationCode.unicodeScalars
+            .filter { CharacterSet.decimalDigits.contains($0) && $0.isASCII }
+            .map(String.init)
+            .joined()
         guard code.count == 6 else {
             message = "Enter the 6-digit verification code."
             return
         }
 
+        verificationCode = code
+
         isLoading = true
         message = nil
         defer { isLoading = false }
         do {
-            _ = try await client.emailOtp.verifyEmail(
+            let response = try await client.emailOtp.verifyEmail(
                 with: .init(email: normalizedEmail, otp: code)
             )
-            await client.session.refreshSession()
-            needsVerification = !isAuthenticated
+
+            if !response.data.status {
+                message = "Invalid verification code. Please try again."
+                return
+            }
+
+            verificationCode = ""
+            needsVerification = false
+            await waitForSessionRefresh(expectAuthenticatedSession: true, maxIterations: 8)
+
             if !isAuthenticated {
                 mode = .signIn
+                password = ""
                 message = "Email verified. Sign in to continue."
+            } else {
+                message = nil
             }
         } catch {
             message = error.localizedDescription
@@ -221,7 +256,7 @@ final class BetterAuthStore: ObservableObject {
                 )
             }
 
-            await client.session.refreshSession()
+            await waitForSessionRefresh(expectAuthenticatedSession: false, maxIterations: 8)
             password = ""
             verificationCode = ""
             needsVerification = false
@@ -239,7 +274,7 @@ final class BetterAuthStore: ObservableObject {
         defer { isLoading = false }
         do {
             _ = try await client.signOut()
-            await client.session.refreshSession()
+            await waitForSessionRefresh(expectAuthenticatedSession: false)
             password = ""
             verificationCode = ""
             needsVerification = false
@@ -252,6 +287,19 @@ final class BetterAuthStore: ObservableObject {
         _ = try await client.emailOtp.sendVerificationOtp(
             with: .init(email: email, type: .emailVerification)
         )
+    }
+
+    private func waitForSessionRefresh(
+        expectAuthenticatedSession: Bool,
+        maxIterations: Int = 6
+    ) async {
+        for _ in 0..<maxIterations {
+            let hasSession = client.session.data != nil
+            if expectAuthenticatedSession ? hasSession : !hasSession {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(120))
+        }
     }
 }
 

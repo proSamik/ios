@@ -11,6 +11,7 @@ import AppKit
 import CoreTransferable
 import Photos
 import PhotosUI
+import RevenueCatUI
 import UIKit
 #endif
 
@@ -26,7 +27,7 @@ struct ContentView: View {
     #if os(iOS)
     @State private var selectedVideoItem: PhotosPickerItem?
     @StateObject private var revenueCat = RevenueCatStore()
-    @State private var billingGate: BillingGateState = .idle
+    @State private var isShowingRevenueCatPaywall = false
     #endif
 
     private var appearanceMode: AppAppearance {
@@ -72,8 +73,23 @@ struct ContentView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
+            .fullScreenCover(isPresented: $isShowingRevenueCatPaywall) {
+                hostedRevenueCatPaywall
+            }
             .task(id: viewModel.auth.session?.user.id) {
-                await refreshBillingGate()
+                guard viewModel.auth.isAuthenticated,
+                      let userID = viewModel.auth.session?.user.id
+                else { return }
+                await viewModel.bootstrapMobileAccount()
+                await revenueCat.configure(userID: userID)
+            }
+            .onChange(of: viewModel.lowCreditsPaywallRequestID) { _, requestID in
+                guard requestID != nil else { return }
+                Task { await presentFirstPassPaywallForLowCredits() }
+            }
+            .onChange(of: viewModel.passRequiredPaywallRequestID) { _, requestID in
+                guard requestID != nil else { return }
+                Task { await presentRequiredPassPaywall() }
             }
         #endif
     }
@@ -83,75 +99,115 @@ struct ContentView: View {
         Group {
             if !viewModel.auth.hasRestoredSession {
                 AppLaunchView()
-            } else if !viewModel.auth.isAuthenticated {
-                LoginGateView(auth: viewModel.auth)
             } else if !hasCompletedOnboarding {
                 OnboardingFlowView(isComplete: $hasCompletedOnboarding)
+            } else if !viewModel.auth.isAuthenticated {
+                LoginGateView(auth: viewModel.auth)
             } else {
-                #if os(iOS)
-                billingContent
-                #else
                 appContent
-                #endif
             }
         }
         .preferredColorScheme(appearanceMode.colorScheme)
     }
 
     #if os(iOS)
-    @ViewBuilder
-    private var billingContent: some View {
-        switch billingGate {
-        case .idle, .checking:
-            BillingAccessLoadingView()
-        case .polarAccess:
-            appContent
-        case .revenueCat:
-            if revenueCat.hasPremium {
-                appContent
-            } else {
-                RevenueCatOnboardingView(store: revenueCat) {
-                    Task {
-                        revenueCat.reset()
-                        billingGate = .idle
-                        await viewModel.auth.signOut()
+    private var hostedRevenueCatPaywall: some View {
+        Group {
+            if let offering = revenueCat.offering {
+                PaywallView(offering: offering, displayCloseButton: true)
+                    .onPurchaseCompleted { _ in
+                        revenueCat.markPurchaseCompleted()
+                        isShowingRevenueCatPaywall = false
+                        Task { await viewModel.resumePreparedResultAfterPurchase() }
                     }
-                }
-            }
-        case .unavailable(let message):
-            BillingAccessUnavailableView(message: message) {
-                Task { await refreshBillingGate(force: true) }
+                    .onRestoreCompleted { _ in
+                        Task {
+                            await revenueCat.refresh()
+                            isShowingRevenueCatPaywall = false
+                            await viewModel.resumePreparedResultAfterPurchase()
+                        }
+                    }
+            } else {
+                BillingAccessLoadingView()
+                    .task { await revenueCat.refresh() }
             }
         }
     }
 
-    private func refreshBillingGate(force: Bool = false) async {
-        guard let userID = viewModel.auth.session?.user.id else {
-            revenueCat.reset()
-            billingGate = .idle
-            return
-        }
-        guard force || billingGate == .idle else { return }
+    private func ensureBillingAccess() async -> Bool {
+        guard let userID = viewModel.auth.session?.user.id else { return false }
+        if revenueCat.hasPremium { return true }
 
-        billingGate = .checking
         do {
             let access = try await viewModel.billingAccess()
-            if access.hasPolarAccess {
-                billingGate = .polarAccess
-                return
-            }
+            if access.hasPolarAccess || access.hasRevenueCatAccess { return true }
+
             guard access.shouldShowRevenueCat else {
-                billingGate = .unavailable(access.message ?? "We could not verify your subscription status.")
-                return
+                viewModel.alert = AppMessage(
+                    title: "Access unavailable",
+                    message: access.message ?? "We could not verify your pass status."
+                )
+                return false
             }
 
+            revenueCat.lockAccess()
             await revenueCat.configure(userID: userID)
-            billingGate = .revenueCat
+            guard revenueCat.offering != nil else {
+                viewModel.alert = AppMessage(
+                    title: "Passes unavailable",
+                    message: revenueCat.errorMessage ?? "The pass options could not be loaded. Please try again."
+                )
+                return false
+            }
+            isShowingRevenueCatPaywall = true
+            return false
         } catch {
-            billingGate = .unavailable(error.localizedDescription)
+            viewModel.alert = AppMessage(title: "Could not check access", message: error.localizedDescription)
+            return false
         }
     }
+
+    private func presentFirstPassPaywallForLowCredits() async {
+        guard let userID = viewModel.auth.session?.user.id else { return }
+        do {
+            let access = try await viewModel.billingAccess()
+            guard access.shouldShowRevenueCat && !access.hasPreviousPass else { return }
+
+            revenueCat.lockAccess()
+            await revenueCat.configure(userID: userID)
+            guard revenueCat.offering != nil else { return }
+            viewModel.alert = nil
+            try? await Task.sleep(for: .milliseconds(300))
+            isShowingRevenueCatPaywall = true
+        } catch {
+            // Keep the original insufficient-credit alert visible on failure.
+        }
+    }
+
+    private func presentRequiredPassPaywall() async {
+        guard let userID = viewModel.auth.session?.user.id else { return }
+        revenueCat.lockAccess()
+        await revenueCat.configure(userID: userID)
+        guard revenueCat.offering != nil else {
+            viewModel.alert = AppMessage(
+                title: "Passes unavailable",
+                message: revenueCat.errorMessage ?? "Pass options could not be loaded. Please try again."
+            )
+            return
+        }
+        viewModel.alert = nil
+        try? await Task.sleep(for: .milliseconds(250))
+        isShowingRevenueCatPaywall = true
+    }
     #endif
+
+    private func requestProtectedAccess() async -> Bool {
+        #if os(iOS)
+        return await ensureBillingAccess()
+        #else
+        return true
+        #endif
+    }
 
     private var appContent: some View {
         TabView(selection: $selectedTab) {
@@ -159,7 +215,9 @@ struct ContentView: View {
                 viewModel: viewModel,
                 onPickVideo: pickVideo,
                 onPickSRT: pickSRT,
-                onSaveOutput: saveURL
+                onSaveOutput: saveURL,
+                requestAccess: requestProtectedAccess,
+                onOpenHistory: downloadHistory
             )
             .tabItem {
                 Label("Create", systemImage: "wand.and.stars")
@@ -196,11 +254,12 @@ struct ContentView: View {
             } else if viewModel.isRendering {
                 RenderProgressOverlay(viewModel: viewModel)
                     .transition(.opacity)
-            } else if isShowingResultScreen, viewModel.resultPreviewURL != nil {
+            } else if isShowingResultScreen {
                 OutputReadyOverlay(
                     viewModel: viewModel,
                     onClose: { isShowingResultScreen = false },
-                    onDownload: saveURL
+                    onDownload: saveURL,
+                    requestAccess: requestProtectedAccess
                 )
                 .transition(.opacity)
             }
@@ -278,10 +337,12 @@ struct ContentView: View {
     }
 
     private func downloadHistory(_ item: LocalUploadQueueItem) {
+        isShowingResultScreen = true
         Task {
-            guard await viewModel.openHistoryItem(item) else { return }
-            await MainActor.run {
-                isShowingResultScreen = true
+            await Task.yield()
+            guard await viewModel.openHistoryItem(item) else {
+                await MainActor.run { isShowingResultScreen = false }
+                return
             }
         }
     }
@@ -398,7 +459,7 @@ struct ContentView: View {
 private enum BillingGateState: Equatable {
     case idle
     case checking
-    case polarAccess
+    case access
     case revenueCat
     case unavailable(String)
 }
@@ -530,91 +591,133 @@ private enum AppAppearance: String, CaseIterable, Identifiable {
 }
 
 private struct CreateWorkspace: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onPickVideo: () -> Void
     var onPickSRT: () -> Void
     var onSaveOutput: (URL) -> Void
+    var requestAccess: () async -> Bool
+    var onOpenHistory: (LocalUploadQueueItem) -> Void
     @State private var step: CreateStep = .upload
 
     var body: some View {
         GeometryReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 20) {
-                    if showsStepProgressHeader {
-                        StepProgressHeader(step: step, canOpenLaterSteps: viewModel.selectedVideo != nil) { nextStep in
-                            guard nextStep == .upload || viewModel.selectedVideo != nil else { return }
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                                step = nextStep
-                            }
-                        }
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-
-                    Group {
-                        switch step {
-                        case .upload:
-                            MediaCard(
-                                viewModel: viewModel,
-                                onPickVideo: onPickVideo
-                            )
-                        case .style:
-                            TemplateCard(viewModel: viewModel, layout: proxy.size.width >= 940 ? .compactGrid : .grid)
-                        case .settings:
-                            VStack(spacing: 18) {
-                                if viewModel.needsAuthentication {
-                                    AuthenticationCard(viewModel: viewModel, auth: viewModel.auth)
-                                        .transition(.opacity.combined(with: .move(edge: .top)))
-                                } else {
-                                    ExportPreparationCard(
-                                        viewModel: viewModel,
-                                        onPickSRT: onPickSRT
-                                    )
-                                    RenderCard(viewModel: viewModel)
-                                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                                    CoreRenderOptionsCard(
-                                        viewModel: viewModel,
-                                        onPickSRT: onPickSRT,
-                                        forceExpanded: false
-                                    )
-                                }
-
-                                if viewModel.hasResult {
-                                    ResultCard(
-                                        viewModel: viewModel,
-                                        onSaveOutput: onSaveOutput
-                                    )
+            let isPortraitPad = proxy.size.width >= 700 && proxy.size.height > proxy.size.width
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    LazyVStack(spacing: 20) {
+                        if showsStepProgressHeader {
+                            StepProgressHeader(step: step, canOpenLaterSteps: viewModel.selectedVideo != nil) { nextStep in
+                                guard nextStep == .upload || viewModel.selectedVideo != nil else { return }
+                                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                                    step = nextStep
                                 }
                             }
-                            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: viewModel.needsAuthentication)
-                        }
-                    }
-                    .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
-                    .frame(minHeight: stepContentMinHeight(for: proxy.size), alignment: .center)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
 
-                    if showsStepNavigation {
-                        StepNavigationBar(
-                            step: step,
-                            canContinue: canContinue,
-                            continueTitle: continueTitle,
-                            onBack: moveBack,
-                            onContinue: moveForward
-                        )
+                            if horizontalSizeClass == .compact {
+                                StepNavigationBar(
+                                    step: step,
+                                    canContinue: canContinue,
+                                    continueTitle: continueTitle,
+                                    onBack: moveBack,
+                                    onContinue: moveForward
+                                )
+                                .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
+                            }
+                        }
+
+                        Group {
+                            switch step {
+                            case .upload:
+                                VStack(spacing: 18) {
+                                    MediaCard(
+                                        viewModel: viewModel,
+                                        onPickVideo: onPickVideo
+                                    )
+                                    if !viewModel.uploadQueue.isEmpty {
+                                        LocalQueueCard(viewModel: viewModel, onOpen: onOpenHistory)
+                                    }
+                                }
+                            case .style:
+                                TemplateCard(viewModel: viewModel, layout: proxy.size.width >= 940 ? .compactGrid : .grid)
+                            case .settings:
+                                VStack(spacing: 18) {
+                                    if viewModel.needsAuthentication {
+                                        AuthenticationCard(viewModel: viewModel, auth: viewModel.auth)
+                                            .transition(.opacity.combined(with: .move(edge: .top)))
+                                    } else {
+                                        ExportPreparationCard(
+                                            viewModel: viewModel,
+                                            onPickSRT: onPickSRT
+                                        )
+                                        RenderCard(viewModel: viewModel)
+                                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                                        CoreRenderOptionsCard(
+                                            viewModel: viewModel,
+                                            onPickSRT: onPickSRT,
+                                            forceExpanded: false
+                                        )
+                                    }
+
+                                    if viewModel.hasResult {
+                                        ResultCard(
+                                            viewModel: viewModel,
+                                            onSaveOutput: onSaveOutput,
+                                            requestAccess: requestAccess
+                                        )
+                                    }
+                                }
+                                .animation(.spring(response: 0.32, dampingFraction: 0.86), value: viewModel.needsAuthentication)
+                            }
+                        }
                         .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
+                        .frame(minHeight: stepContentMinHeight(for: proxy.size), alignment: .center)
+
+                        if showsStepNavigation {
+                            StepNavigationBar(
+                                step: step,
+                                canContinue: canContinue,
+                                continueTitle: continueTitle,
+                                onBack: moveBack,
+                                onContinue: moveForward
+                            )
+                            .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
+                        }
+                    }
+                    .id("create-workspace-top")
+                    .onChange(of: viewModel.selectedVideo?.id) { _, videoId in
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            step = videoId == nil ? .upload : .style
+                        }
+                    }
+                    .onChange(of: viewModel.outputRemoteURL) { _, remoteURL in
+                        guard remoteURL != nil else { return }
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                            step = .upload
+                        }
+                    }
+                    .frame(maxWidth: 1180)
+                    .frame(
+                        minHeight: isPortraitPad ? max(0, proxy.size.height - 96) : nil,
+                        alignment: .center
+                    )
+                    .padding(.horizontal, proxy.size.width < 520 ? 14 : 24)
+                    .padding(.vertical, isPortraitPad ? 24 : (proxy.size.width < 520 ? 16 : 26))
+                    .padding(.bottom, isPortraitPad ? 24 : 110)
+                    .frame(maxWidth: .infinity)
+                    .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showsStepProgressHeader)
+                }
+                .onChange(of: step) { _, _ in
+                    Task { @MainActor in
+                        await Task.yield()
+                        withAnimation(.easeOut(duration: 0.24)) {
+                            scrollProxy.scrollTo("create-workspace-top", anchor: .top)
+                        }
                     }
                 }
-                .onChange(of: viewModel.selectedVideo?.id) { _, videoId in
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
-                        step = videoId == nil ? .upload : .style
-                    }
-                }
-                .frame(maxWidth: 1180)
-                .padding(.horizontal, proxy.size.width < 520 ? 14 : 24)
-                .padding(.vertical, proxy.size.width < 520 ? 16 : 26)
-                .padding(.bottom, 110)
-                .frame(maxWidth: .infinity)
-                .animation(.spring(response: 0.32, dampingFraction: 0.86), value: showsStepProgressHeader)
+                .background(AppBackground())
             }
-            .background(AppBackground())
         }
     }
 
@@ -684,7 +787,7 @@ private struct CreateWorkspace: View {
 
     private func stepContentMaxWidth(for width: CGFloat) -> CGFloat {
         if width >= 940 {
-            return step == .style ? 1120 : 720
+            return step == .style ? 1120 : 820
         }
         return .infinity
     }
@@ -967,7 +1070,7 @@ private struct AuthenticationCard: View {
             }
             .pickerStyle(.segmented)
 
-            if auth.mode == .signUp && !auth.needsVerification {
+                    if auth.mode == .signUp && !auth.needsVerification {
                 TextField("Name", text: $auth.name)
                     .focused($focusedField, equals: .name)
                     .textContentType(.name)
@@ -1005,12 +1108,17 @@ private struct AuthenticationCard: View {
                 .textContentType(.oneTimeCode)
                 .brandedInputField()
                 #if os(iOS)
-                .keyboardType(.numberPad)
+                .keyboardType(.asciiCapableNumberPad)
                 #endif
+                .onChange(of: auth.verificationCode) { _, newValue in
+                    auth.verificationCode = normalizedOTP(newValue)
+                }
 
             Button {
-                focusedField = nil
-                Task { await auth.verifyEmail() }
+                Task {
+                    focusedField = nil
+                    await verifyEmailFromCard()
+                }
             } label: {
                 Label(auth.isLoading ? "Verifying" : "Verify Email", systemImage: "checkmark.seal.fill")
                     .frame(maxWidth: .infinity)
@@ -1019,7 +1127,11 @@ private struct AuthenticationCard: View {
             .disabled(auth.isLoading || auth.verificationCode.trimmingCharacters(in: .whitespacesAndNewlines).count != 6)
 
             Button("Send a new code") {
-                Task { await auth.resendVerificationCode() }
+                Task {
+                    focusedField = nil
+                    try? await Task.sleep(for: .milliseconds(350))
+                    await auth.resendVerificationCode()
+                }
             }
             .nativeGlassButton()
             .disabled(auth.isLoading)
@@ -1052,6 +1164,24 @@ private struct AuthenticationCard: View {
         let balance = quota.aiCredits.balance.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "Unknown"
         return "AI credits available: \(balance)."
     }
+
+    private func verifyEmailFromCard() async {
+        await MainActor.run {
+            focusedField = nil
+        }
+        // Keep the verification field alive until SwiftUI has completed the
+        // focus transition and detached the system keyboard.
+        try? await Task.sleep(for: .milliseconds(450))
+        await auth.verifyEmail()
+    }
+
+    private func normalizedOTP(_ value: String) -> String {
+        String(value.unicodeScalars
+            .filter { CharacterSet.decimalDigits.contains($0) && $0.isASCII }
+            .prefix(6)
+            .map(Character.init))
+    }
+
 }
 
 private struct AccountDeletionSheet: View {
@@ -2085,6 +2215,7 @@ private struct SRTAttachmentControl: View {
 private struct LocalQueueCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onOpen: (LocalUploadQueueItem) -> Void
+    @State private var openingProjectID: String?
 
     var body: some View {
         BrandCard {
@@ -2110,10 +2241,28 @@ private struct LocalQueueCard: View {
                 } else {
                     VStack(spacing: 10) {
                         ForEach(viewModel.uploadQueue) { item in
-                            LocalQueueRow(item: item, onOpen: { onOpen(item) })
+                            LocalQueueRow(
+                                item: item,
+                                isOpening: openingProjectID == item.projectId,
+                                onOpen: {
+                                    guard openingProjectID == nil else { return }
+                                    openingProjectID = item.projectId
+                                    onOpen(item)
+                                }
+                            )
                         }
                     }
                 }
+            }
+        }
+        .onChange(of: viewModel.outputRemoteURL) { _, remoteURL in
+            if remoteURL != nil {
+                openingProjectID = nil
+            }
+        }
+        .onChange(of: viewModel.alert?.id) { _, alertID in
+            if alertID != nil {
+                openingProjectID = nil
             }
         }
     }
@@ -2121,6 +2270,7 @@ private struct LocalQueueCard: View {
 
 private struct LocalQueueRow: View {
     let item: LocalUploadQueueItem
+    let isOpening: Bool
     var onOpen: () -> Void
 
     var body: some View {
@@ -2154,7 +2304,16 @@ private struct LocalQueueRow: View {
                 }
 
                 if item.isDownloadAvailable {
-                    Label("Open result", systemImage: "play.rectangle.fill")
+                    HStack(spacing: 8) {
+                        if isOpening {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(Brand.navy)
+                        } else {
+                            Image(systemName: "play.rectangle.fill")
+                        }
+                        Text(isOpening ? "Preparing result…" : "Open result")
+                    }
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 9)
@@ -2165,7 +2324,7 @@ private struct LocalQueueRow: View {
             .nativeGlassPanel(cornerRadius: 8, interactive: true)
         }
         .buttonStyle(.plain)
-        .disabled(!item.isDownloadAvailable)
+        .disabled(!item.isDownloadAvailable || isOpening)
     }
 }
 
@@ -2213,6 +2372,34 @@ private struct RenderCard: View {
         BrandCard {
             VStack(alignment: .leading, spacing: 16) {
                 CardHeader(title: "Export Video", systemImage: "square.and.arrow.up.fill")
+
+                if let credits = viewModel.previewEstimatedCredits {
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Brand.navy)
+                            .frame(width: 34, height: 34)
+                            .nativeGlassPanel(cornerRadius: 10)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Estimated AI credits")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(Brand.muted)
+                            Text("\(credits.formatted(.number.precision(.fractionLength(0...2)))) credits")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .foregroundStyle(Brand.ink)
+                        }
+
+                        Spacer(minLength: 8)
+
+                        Text("Based on video length")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Brand.muted)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .padding(12)
+                    .nativeGlassPanel(cornerRadius: 12)
+                }
 
                 Button {
                     viewModel.render()
@@ -2726,6 +2913,7 @@ private struct OutputReadyOverlay: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onClose: () -> Void
     var onDownload: (URL) -> Void
+    var requestAccess: () async -> Bool
     @Environment(\.colorScheme) private var colorScheme
 
     private var backgroundColor: Color {
@@ -2763,7 +2951,11 @@ private struct OutputReadyOverlay: View {
                                     )
                                 )
 
-                            ShareDestinationGrid(viewModel: viewModel, onSaveOutput: onDownload)
+                            ShareDestinationGrid(
+                                viewModel: viewModel,
+                                onSaveOutput: onDownload,
+                                requestAccess: requestAccess
+                            )
                                 .padding(.horizontal, 24)
                         } else {
                             OutputDownloadPreparation(viewModel: viewModel)
@@ -2849,6 +3041,7 @@ private struct OutputDownloadPreparation: View {
 private struct ResultCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onSaveOutput: (URL) -> Void
+    var requestAccess: () async -> Bool
 
     var body: some View {
         BrandCard {
@@ -2866,7 +3059,11 @@ private struct ResultCard: View {
                         .frame(maxWidth: viewModel.aspectRatio.previewMaxWidth)
                         .frame(maxWidth: .infinity)
 
-                    ShareDestinationGrid(viewModel: viewModel, onSaveOutput: onSaveOutput)
+                    ShareDestinationGrid(
+                        viewModel: viewModel,
+                        onSaveOutput: onSaveOutput,
+                        requestAccess: requestAccess
+                    )
                 }
             }
         }
@@ -2876,6 +3073,7 @@ private struct ResultCard: View {
 private struct ShareDestinationGrid: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onSaveOutput: (URL) -> Void
+    var requestAccess: () async -> Bool
     @State private var isPreparingDownload = false
     @State private var isPreparingShare = false
     @State private var shareItem: ShareSheetItem?
@@ -2922,6 +3120,10 @@ private struct ShareDestinationGrid: View {
         guard !isPreparingDownload else { return }
         isPreparingDownload = true
         Task {
+            guard await requestAccess() else {
+                await MainActor.run { isPreparingDownload = false }
+                return
+            }
             let outputURL = await viewModel.downloadCurrentOutput()
             await MainActor.run {
                 isPreparingDownload = false
@@ -2934,8 +3136,12 @@ private struct ShareDestinationGrid: View {
     private func prepareShare() {
         guard !isPreparingShare else { return }
         isPreparingShare = true
-        viewModel.cacheCurrentOutput()
         Task {
+            guard await requestAccess() else {
+                await MainActor.run { isPreparingShare = false }
+                return
+            }
+            await MainActor.run { viewModel.cacheCurrentOutput() }
             let outputURL = await viewModel.downloadCurrentOutput()
             await MainActor.run {
                 isPreparingShare = false
