@@ -1094,7 +1094,7 @@ private struct AccountDeletionSheet: View {
 
                     VStack(alignment: .leading, spacing: 12) {
                         deletionNotice("Your remaining credits and account benefits will be revoked.")
-                        deletionNotice("Active Polar subscriptions will be canceled immediately.")
+                        deletionNotice("Active subscriptions will be canceled immediately.")
                         deletionNotice("Projects, render history, sessions and linked sign-in accounts will be removed.")
                         deletionNotice("Polar may retain anonymized payment records where legally required.")
                     }
