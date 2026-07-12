@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		BA1000000000000000000001 /* BetterAuth in Frameworks */ = {isa = PBXBuildFile; productRef = BA1000000000000000000004 /* BetterAuth */; };
+		BA1000000000000000000002 /* BetterAuthEmailOTP in Frameworks */ = {isa = PBXBuildFile; productRef = BA1000000000000000000005 /* BetterAuthEmailOTP */; };
+		RC1000000000000000000001 /* RevenueCat in Frameworks */ = {isa = PBXBuildFile; productRef = RC1000000000000000000003 /* RevenueCat */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		C1E41E6C2FEC73B500871397 /* Viral Captions.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Viral Captions.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,6 +29,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				BA1000000000000000000001 /* BetterAuth in Frameworks */,
+				BA1000000000000000000002 /* BetterAuthEmailOTP in Frameworks */,
+				RC1000000000000000000001 /* RevenueCat in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -65,6 +74,9 @@
 			);
 			name = "Viral Captions";
 			packageProductDependencies = (
+				BA1000000000000000000004 /* BetterAuth */,
+				BA1000000000000000000005 /* BetterAuthEmailOTP */,
+				RC1000000000000000000003 /* RevenueCat */,
 			);
 			productName = "Viral Captions";
 			productReference = C1E41E6C2FEC73B500871397 /* Viral Captions.app */;
@@ -78,10 +90,15 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2650;
-				LastUpgradeCheck = 2650;
+				LastUpgradeCheck = 2660;
 				TargetAttributes = {
 					C1E41E6B2FEC73B500871397 = {
 						CreatedOnToolsVersion = 26.5;
+						SystemCapabilities = {
+							com.apple.InAppPurchase = {
+								enabled = 1;
+							};
+						};
 					};
 				};
 			};
@@ -94,6 +111,10 @@
 			);
 			mainGroup = C1E41E632FEC73B500871397;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				BA1000000000000000000003 /* XCRemoteSwiftPackageReference "better-auth-swift" */,
+				RC1000000000000000000002 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = C1E41E6D2FEC73B500871397 /* Products */;
 			projectDirPath = "";
@@ -185,6 +206,7 @@
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
@@ -247,6 +269,7 @@
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = YES;
 				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = YES;
@@ -431,6 +454,43 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		BA1000000000000000000003 /* XCRemoteSwiftPackageReference "better-auth-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/proSamik/better-auth-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.2.1;
+			};
+		};
+		RC1000000000000000000002 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/RevenueCat/purchases-ios-spm.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 5.43.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		BA1000000000000000000004 /* BetterAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BA1000000000000000000003 /* XCRemoteSwiftPackageReference "better-auth-swift" */;
+			productName = BetterAuth;
+		};
+		BA1000000000000000000005 /* BetterAuthEmailOTP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BA1000000000000000000003 /* XCRemoteSwiftPackageReference "better-auth-swift" */;
+			productName = BetterAuthEmailOTP;
+		};
+		RC1000000000000000000003 /* RevenueCat */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = RC1000000000000000000002 /* XCRemoteSwiftPackageReference "purchases-ios-spm" */;
+			productName = RevenueCat;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = C1E41E642FEC73B500871397 /* Project object */;
 }

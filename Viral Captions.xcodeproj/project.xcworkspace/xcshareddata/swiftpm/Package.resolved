@@ -1,0 +1,24 @@
+{
+  "originHash" : "fbacaf3ae21bf2c568f1255fd75191351c37f9d904d50eeba8ea8f06e3129aa6",
+  "pins" : [
+    {
+      "identity" : "better-auth-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/proSamik/better-auth-swift.git",
+      "state" : {
+        "revision" : "5d7886430be7ec03834e3ac2dfb1c03fbf85ade0",
+        "version" : "2.2.1"
+      }
+    },
+    {
+      "identity" : "purchases-ios-spm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/RevenueCat/purchases-ios-spm.git",
+      "state" : {
+        "revision" : "8969bf1feaca2cc9efaa7630cd148cec5005f2f8",
+        "version" : "5.80.3"
+      }
+    }
+  ],
+  "version" : 3
+}

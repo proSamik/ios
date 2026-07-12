@@ -1,5 +1,6 @@
 import AVFoundation
 import AVKit
+import BetterAuth
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
@@ -19,9 +20,13 @@ struct ContentView: View {
     @State private var showingSRTImporter = false
     @State private var selectedTab: AppTab = .create
     @State private var isShowingResultScreen = false
+    @State private var isSavingToLibrary = false
     @AppStorage("appearanceMode") private var appearanceModeRaw = AppAppearance.light.rawValue
+    @AppStorage("hasCompletedOnboardingV2") private var hasCompletedOnboarding = false
     #if os(iOS)
     @State private var selectedVideoItem: PhotosPickerItem?
+    @StateObject private var revenueCat = RevenueCatStore()
+    @State private var billingGate: BillingGateState = .idle
     #endif
 
     private var appearanceMode: AppAppearance {
@@ -31,7 +36,7 @@ struct ContentView: View {
     @ViewBuilder
     var body: some View {
         #if os(macOS)
-        appContent
+        rootContent
             .alert(item: $viewModel.alert) { message in
                 Alert(
                     title: Text(message.title),
@@ -40,7 +45,7 @@ struct ContentView: View {
                 )
             }
         #else
-        appContent
+        rootContent
             .photosPicker(
                 isPresented: $showingVideoImporter,
                 selection: $selectedVideoItem,
@@ -57,11 +62,8 @@ struct ContentView: View {
             ) { result in
                 handleImport(result, mediaType: .srt)
             }
-            .onAppear {
-                preflightPhotoPermission()
-            }
-            .onChange(of: viewModel.resultPreviewURL) { _, previewURL in
-                isShowingResultScreen = previewURL != nil
+            .onChange(of: viewModel.outputRemoteURL) { _, remoteURL in
+                isShowingResultScreen = remoteURL != nil
             }
             .alert(item: $viewModel.alert) { message in
                 Alert(
@@ -70,8 +72,86 @@ struct ContentView: View {
                     dismissButton: .default(Text("OK"))
                 )
             }
+            .task(id: viewModel.auth.session?.user.id) {
+                await refreshBillingGate()
+            }
         #endif
     }
+
+    @ViewBuilder
+    private var rootContent: some View {
+        Group {
+            if !viewModel.auth.hasRestoredSession {
+                AppLaunchView()
+            } else if !viewModel.auth.isAuthenticated {
+                LoginGateView(auth: viewModel.auth)
+            } else if !hasCompletedOnboarding {
+                OnboardingFlowView(isComplete: $hasCompletedOnboarding)
+            } else {
+                #if os(iOS)
+                billingContent
+                #else
+                appContent
+                #endif
+            }
+        }
+        .preferredColorScheme(appearanceMode.colorScheme)
+    }
+
+    #if os(iOS)
+    @ViewBuilder
+    private var billingContent: some View {
+        switch billingGate {
+        case .idle, .checking:
+            BillingAccessLoadingView()
+        case .polarAccess:
+            appContent
+        case .revenueCat:
+            if revenueCat.hasPremium {
+                appContent
+            } else {
+                RevenueCatOnboardingView(store: revenueCat) {
+                    Task {
+                        revenueCat.reset()
+                        billingGate = .idle
+                        await viewModel.auth.signOut()
+                    }
+                }
+            }
+        case .unavailable(let message):
+            BillingAccessUnavailableView(message: message) {
+                Task { await refreshBillingGate(force: true) }
+            }
+        }
+    }
+
+    private func refreshBillingGate(force: Bool = false) async {
+        guard let userID = viewModel.auth.session?.user.id else {
+            revenueCat.reset()
+            billingGate = .idle
+            return
+        }
+        guard force || billingGate == .idle else { return }
+
+        billingGate = .checking
+        do {
+            let access = try await viewModel.billingAccess()
+            if access.hasPolarAccess {
+                billingGate = .polarAccess
+                return
+            }
+            guard access.shouldShowRevenueCat else {
+                billingGate = .unavailable(access.message ?? "We could not verify your subscription status.")
+                return
+            }
+
+            await revenueCat.configure(userID: userID)
+            billingGate = .revenueCat
+        } catch {
+            billingGate = .unavailable(error.localizedDescription)
+        }
+    }
+    #endif
 
     private var appContent: some View {
         TabView(selection: $selectedTab) {
@@ -104,7 +184,10 @@ struct ContentView: View {
         }
         .preferredColorScheme(appearanceMode.colorScheme)
         .overlay {
-            if viewModel.isTranscribing {
+            if isSavingToLibrary {
+                SavingToLibraryOverlay()
+                    .transition(.opacity)
+            } else if viewModel.isTranscribing {
                 TranscriptionProgressOverlay(viewModel: viewModel)
                     .transition(.opacity)
             } else if viewModel.isSRTEditorPresented {
@@ -204,16 +287,11 @@ struct ContentView: View {
     }
 
     #if os(iOS)
-    private func preflightPhotoPermission() {
-        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-        guard status == .notDetermined else { return }
-        Task {
-            _ = await requestPhotoAddAuthorization()
-        }
-    }
-
     private func saveOutputToPhotos(_ outputURL: URL) {
+        guard !isSavingToLibrary else { return }
+        isSavingToLibrary = true
         Task {
+            defer { isSavingToLibrary = false }
             do {
                 let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
                 let authorized = status == .authorized || status == .limited
@@ -303,7 +381,7 @@ struct ContentView: View {
 
                 await MainActor.run {
                     selectedVideoItem = nil
-                    viewModel.importVideo(from: movie.url)
+                    viewModel.importVideo(from: movie.url, alreadyLocal: true)
                 }
             } catch {
                 await MainActor.run {
@@ -314,6 +392,72 @@ struct ContentView: View {
         }
     }
     #endif
+}
+
+#if os(iOS)
+private enum BillingGateState: Equatable {
+    case idle
+    case checking
+    case polarAccess
+    case revenueCat
+    case unavailable(String)
+}
+
+private struct BillingAccessLoadingView: View {
+    var body: some View {
+        ZStack {
+            Color(.systemGroupedBackground).ignoresSafeArea()
+            VStack(spacing: 18) {
+                Image("SubclipLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 78, height: 78)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                ProgressView()
+                Text("Checking your access…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct BillingAccessUnavailableView: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Couldn’t Verify Access", systemImage: "wifi.exclamationmark")
+        } description: {
+            Text(message)
+        } actions: {
+            Button("Try Again", action: retry)
+                .buttonStyle(.borderedProminent)
+        }
+    }
+}
+#endif
+
+private struct SavingToLibraryOverlay: View {
+    var body: some View {
+        ZStack {
+            Brand.softSurface.opacity(0.96).ignoresSafeArea()
+            VStack(spacing: 18) {
+                ProgressView()
+                    .controlSize(.large)
+                    .tint(Brand.navy)
+                Text("Saving to Photos…")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .foregroundStyle(Brand.ink)
+                Text("This should only take a moment.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Brand.muted)
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Saving video to Photos")
+    }
 }
 
 #if os(iOS)
@@ -417,8 +561,8 @@ private struct CreateWorkspace: View {
                             TemplateCard(viewModel: viewModel, layout: proxy.size.width >= 940 ? .compactGrid : .grid)
                         case .settings:
                             VStack(spacing: 18) {
-                                if viewModel.needsAPIKeyValidation {
-                                    APIKeyCard(viewModel: viewModel)
+                                if viewModel.needsAuthentication {
+                                    AuthenticationCard(viewModel: viewModel, auth: viewModel.auth)
                                         .transition(.opacity.combined(with: .move(edge: .top)))
                                 } else {
                                     ExportPreparationCard(
@@ -441,7 +585,7 @@ private struct CreateWorkspace: View {
                                     )
                                 }
                             }
-                            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: viewModel.needsAPIKeyValidation)
+                            .animation(.spring(response: 0.32, dampingFraction: 0.86), value: viewModel.needsAuthentication)
                         }
                     }
                     .frame(maxWidth: stepContentMaxWidth(for: proxy.size.width))
@@ -658,7 +802,7 @@ private struct SettingsWorkspace: View {
                     if proxy.size.width >= 940 {
                         HStack(alignment: .top, spacing: 18) {
                             VStack(spacing: 18) {
-                                APIKeyCard(viewModel: viewModel)
+                                AuthenticationCard(viewModel: viewModel, auth: viewModel.auth)
                                 ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
                             }
                             .frame(maxWidth: 520)
@@ -670,7 +814,7 @@ private struct SettingsWorkspace: View {
                         }
                     } else {
                         VStack(spacing: 18) {
-                            APIKeyCard(viewModel: viewModel)
+                            AuthenticationCard(viewModel: viewModel, auth: viewModel.auth)
                             ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
                             LocalQueueCard(viewModel: viewModel, onOpen: onDownloadHistory)
                         }
@@ -692,101 +836,348 @@ private struct AppBackground: View {
     }
 }
 
-private struct APIKeyCard: View {
+private struct AuthenticationCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
-    @FocusState private var apiKeyFocused: Bool
+    @ObservedObject var auth: BetterAuthStore
+    @FocusState private var focusedField: Field?
+    @State private var isShowingDeleteAccount = false
+
+    private enum Field {
+        case name, email, password, verificationCode
+    }
 
     var body: some View {
         BrandCard {
             VStack(alignment: .leading, spacing: 14) {
-                CardHeader(title: "API Key", systemImage: "key.fill")
-                SecureField(
-                    "Subclip API key",
-                    text: $viewModel.apiKey,
-                    prompt: Text("Subclip API key").foregroundColor(.secondary)
-                )
-                    .focused($apiKeyFocused)
-                    .brandedInputField()
-                    #if os(iOS)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.done)
-                    .onSubmit {
-                        apiKeyFocused = false
-                    }
-                    #endif
-                    .onChange(of: viewModel.apiKey) { _, _ in
-                        viewModel.apiKeyDidChange()
-                    }
+                CardHeader(title: "Subclip Account", systemImage: "person.crop.circle.fill")
 
-                LiquidGlassGroup(spacing: 10) {
-                    HStack(spacing: 10) {
-                        Button {
-                            apiKeyFocused = false
-                            #if os(iOS)
-                            UIApplication.shared.sendAction(
-                                #selector(UIResponder.resignFirstResponder),
-                                to: nil,
-                                from: nil,
-                                for: nil
-                            )
-                            #endif
-                            viewModel.saveAPIKey()
-                        } label: {
-                            Label(
-                                viewModel.isCheckingQuota ? "Checking credits" : "Check credits & save",
-                                systemImage: viewModel.isCheckingQuota ? "clock.arrow.circlepath" : "checkmark.seal.fill"
-                            )
-                                .frame(maxWidth: .infinity)
-                        }
-                        .nativeGlassButton()
-                        .disabled(viewModel.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isCheckingQuota)
-
-                        Button {
-                            viewModel.clearAPIKey()
-                        } label: {
-                            Image(systemName: "trash")
-                                .frame(width: 34, height: 34)
-                        }
-                        .nativeGlassButton()
-                        .accessibilityLabel("Remove saved API key")
-                    }
-                }
-
-                Link(destination: URL(string: "https://subclip.app/account/api")!) {
-                    Label("Get API key from Subclip", systemImage: "key.viewfinder")
-                        .frame(maxWidth: .infinity)
-                }
-                .nativeGlassButton()
-
-                if let quota = viewModel.quotaInfo {
-                    HStack(spacing: 8) {
-                        Image(systemName: quota.aiCredits.allowed ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(quota.aiCredits.allowed ? Brand.navy : .orange)
-                        Text(quotaSummary(for: quota))
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(Brand.ink)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(10)
-                    .nativeGlassPanel(cornerRadius: 8)
+                if let session = auth.session {
+                    signedInContent(session: session)
+                } else {
+                    signedOutContent
                 }
 
                 HStack(spacing: 8) {
                     Image(systemName: "lock.fill")
                         .foregroundStyle(Brand.navy)
-                    Text("Stored locally in Keychain.")
+                    Text("Your encrypted session is stored in Keychain.")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(Brand.muted)
                     Spacer(minLength: 0)
                 }
             }
         }
+        .task(id: auth.isAuthenticated) {
+            if auth.isAuthenticated && viewModel.quotaInfo == nil {
+                await viewModel.refreshQuota()
+            }
+        }
+        .sheet(isPresented: $isShowingDeleteAccount) {
+            if let accountEmail = auth.session?.user.email {
+                AccountDeletionSheet(auth: auth, accountEmail: accountEmail) {
+                    viewModel.clearUploadQueue()
+                    viewModel.resetResult()
+                    viewModel.quotaInfo = nil
+                }
+            }
+        }
+    }
+
+    private func signedInContent(session: Session) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Brand.navy)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(session.user.name)
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(Brand.ink)
+                    Text(session.user.email)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Brand.muted)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .nativeGlassPanel(cornerRadius: 10)
+
+            if let quota = viewModel.quotaInfo {
+                HStack(spacing: 8) {
+                    Image(systemName: quota.aiCredits.allowed ? "sparkles" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(quota.aiCredits.allowed ? Brand.navy : .orange)
+                    Text(quotaSummary(for: quota))
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(Brand.ink)
+                    Spacer(minLength: 0)
+                }
+                .padding(10)
+                .nativeGlassPanel(cornerRadius: 8)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task { await viewModel.refreshQuota() }
+                } label: {
+                    Label(
+                        viewModel.isCheckingQuota ? "Checking credits" : "Refresh credits",
+                        systemImage: viewModel.isCheckingQuota ? "clock.arrow.circlepath" : "arrow.clockwise"
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .nativeGlassButton()
+                .disabled(viewModel.isCheckingQuota)
+
+                Button {
+                    Task {
+                        await auth.signOut()
+                        viewModel.quotaInfo = nil
+                    }
+                } label: {
+                    Label("Sign Out", systemImage: "rectangle.portrait.and.arrow.right")
+                }
+                .nativeGlassButton()
+            }
+
+            Divider()
+                .padding(.vertical, 2)
+
+            Button(role: .destructive) {
+                auth.message = nil
+                isShowingDeleteAccount = true
+            } label: {
+                Label("Delete Account", systemImage: "trash.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.red)
+            .padding(.vertical, 10)
+            .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .accessibilityHint("Permanently deletes your Subclip account and subscription benefits")
+        }
+    }
+
+    private var signedOutContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Picker("Account action", selection: $auth.mode) {
+                ForEach(BetterAuthStore.Mode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if auth.mode == .signUp && !auth.needsVerification {
+                TextField("Name", text: $auth.name)
+                    .focused($focusedField, equals: .name)
+                    .textContentType(.name)
+                    .brandedInputField()
+            }
+
+            TextField("Email", text: $auth.email)
+                .focused($focusedField, equals: .email)
+                .textContentType(.emailAddress)
+                .brandedInputField()
+                #if os(iOS)
+                .keyboardType(.emailAddress)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                #endif
+
+            if auth.needsVerification {
+                verificationContent
+            } else {
+                passwordContent
+            }
+
+            if let message = auth.message {
+                Text(message)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Brand.muted)
+            }
+        }
+    }
+
+    private var verificationContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            TextField("6-digit verification code", text: $auth.verificationCode)
+                .focused($focusedField, equals: .verificationCode)
+                .textContentType(.oneTimeCode)
+                .brandedInputField()
+                #if os(iOS)
+                .keyboardType(.numberPad)
+                #endif
+
+            Button {
+                focusedField = nil
+                Task { await auth.verifyEmail() }
+            } label: {
+                Label(auth.isLoading ? "Verifying" : "Verify Email", systemImage: "checkmark.seal.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .nativeGlassButton(prominent: true)
+            .disabled(auth.isLoading || auth.verificationCode.trimmingCharacters(in: .whitespacesAndNewlines).count != 6)
+
+            Button("Send a new code") {
+                Task { await auth.resendVerificationCode() }
+            }
+            .nativeGlassButton()
+            .disabled(auth.isLoading)
+        }
+    }
+
+    private var passwordContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SecureField("Password", text: $auth.password)
+                .focused($focusedField, equals: .password)
+                .textContentType(auth.mode == .signUp ? .newPassword : .password)
+                .brandedInputField()
+
+            Button {
+                focusedField = nil
+                Task { await auth.submit() }
+            } label: {
+                Label(
+                    auth.isLoading ? "Please wait" : auth.mode.rawValue,
+                    systemImage: auth.mode == .signIn ? "person.fill.checkmark" : "person.crop.circle.badge.plus"
+                )
+                .frame(maxWidth: .infinity)
+            }
+            .nativeGlassButton(prominent: true)
+            .disabled(auth.isLoading || auth.email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || auth.password.isEmpty)
+        }
     }
 
     private func quotaSummary(for quota: QuotaResponse) -> String {
         let balance = quota.aiCredits.balance.map { $0.formatted(.number.precision(.fractionLength(0...2))) } ?? "Unknown"
         return "AI credits available: \(balance)."
+    }
+}
+
+private struct AccountDeletionSheet: View {
+    @ObservedObject var auth: BetterAuthStore
+    let accountEmail: String
+    let onDeleted: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmationEmail = ""
+    @FocusState private var isEmailFocused: Bool
+
+    private var emailMatches: Bool {
+        confirmationEmail
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .localizedCaseInsensitiveCompare(accountEmail) == .orderedSame
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.red.opacity(0.10))
+                                .frame(width: 76, height: 76)
+                            Image(systemName: "trash.fill")
+                                .font(.system(size: 30, weight: .semibold))
+                                .foregroundStyle(.red)
+                        }
+                        Text("Permanently delete account?")
+                            .font(.system(size: 24, weight: .bold, design: .rounded))
+                            .foregroundStyle(Brand.ink)
+                            .multilineTextAlignment(.center)
+                        Text("This cannot be undone.")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.red)
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        deletionNotice("Your remaining credits and account benefits will be revoked.")
+                        deletionNotice("Active Polar subscriptions will be canceled immediately.")
+                        deletionNotice("Projects, render history, sessions and linked sign-in accounts will be removed.")
+                        deletionNotice("Polar may retain anonymized payment records where legally required.")
+                    }
+                    .padding(16)
+                    .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Type \(accountEmail) to confirm")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Brand.ink)
+                        TextField("Account email", text: $confirmationEmail)
+                            .focused($isEmailFocused)
+                            .textContentType(.emailAddress)
+                            .font(.system(size: 15, weight: .medium))
+                            .padding(.horizontal, 15)
+                            .frame(height: 54)
+                            .background(Brand.softSurface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(emailMatches ? Color.red.opacity(0.65) : Brand.line, lineWidth: emailMatches ? 1.5 : 1)
+                            }
+                            #if os(iOS)
+                            .keyboardType(.emailAddress)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            #endif
+                    }
+
+                    if let message = auth.message {
+                        Label(message, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.red)
+                    }
+
+                    Button(role: .destructive) {
+                        Task {
+                            if await auth.deleteAccount(confirmationEmail: confirmationEmail) {
+                                onDeleted()
+                                dismiss()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if auth.isLoading { ProgressView().tint(.white) }
+                            Image(systemName: auth.isLoading ? "hourglass" : "trash.fill")
+                            Text(auth.isLoading ? "Deleting Account…" : "Delete My Account")
+                        }
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 54)
+                        .background(Color.red, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!emailMatches || auth.isLoading)
+                    .opacity(emailMatches ? 1 : 0.45)
+                }
+                .padding(28)
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
+            }
+            .background(Brand.softSurface.ignoresSafeArea())
+            .navigationTitle("Delete Account")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .disabled(auth.isLoading)
+                }
+            }
+            .interactiveDismissDisabled(auth.isLoading)
+            .onAppear { isEmailFocused = true }
+        }
+    }
+
+    private func deletionNotice(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "minus.circle.fill")
+                .foregroundStyle(.red)
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Brand.ink)
+        }
     }
 }
 
@@ -1032,7 +1423,10 @@ private struct TemplateButton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             ZStack(alignment: .bottomLeading) {
-                TemplatePreviewVideo(template: template, playbackEnabled: playbackEnabled)
+                TemplatePreviewVideo(
+                    template: template,
+                    playbackEnabled: playbackEnabled && selected
+                )
 
                 VStack {
                     HStack {
@@ -1202,9 +1596,6 @@ private struct TemplatePreviewVideo: View {
             updatePlayback()
         }
         .onChange(of: playbackEnabled) { _, _ in
-            updatePlayback()
-        }
-        .onChange(of: shouldPlay) { _, _ in
             updatePlayback()
         }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
@@ -2374,6 +2765,10 @@ private struct OutputReadyOverlay: View {
 
                             ShareDestinationGrid(viewModel: viewModel, onSaveOutput: onDownload)
                                 .padding(.horizontal, 24)
+                        } else {
+                            OutputDownloadPreparation(viewModel: viewModel)
+                                .frame(maxWidth: 440)
+                                .padding(.horizontal, 24)
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -2396,6 +2791,58 @@ private struct OutputReadyOverlay: View {
                 .padding(.trailing, 20)
             }
         }
+    }
+}
+
+private struct OutputDownloadPreparation: View {
+    @ObservedObject var viewModel: ViralCaptionsViewModel
+
+    private var progress: Double {
+        viewModel.outputDownloadProgress ?? 0
+    }
+
+    var body: some View {
+        VStack(spacing: 22) {
+            ZStack {
+                Circle()
+                    .stroke(Brand.line, lineWidth: 10)
+                Circle()
+                    .trim(from: 0, to: max(0.02, progress))
+                    .stroke(Brand.navy, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundStyle(Brand.navy)
+            }
+            .frame(width: 112, height: 112)
+
+            VStack(spacing: 8) {
+                Text("Your export is ready")
+                    .font(.system(size: 25, weight: .bold, design: .rounded))
+                    .foregroundStyle(Brand.ink)
+                Text(downloadStatusText)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Brand.muted)
+                    .multilineTextAlignment(.center)
+            }
+
+            ProgressView(value: progress)
+                .progressViewStyle(.linear)
+                .tint(Brand.navy)
+        }
+        .padding(28)
+        .background(Brand.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Brand.line, lineWidth: 1)
+        }
+    }
+
+    private var downloadStatusText: String {
+        if let value = viewModel.outputDownloadProgress {
+            return "Downloading securely… \(Int((value * 100).rounded()))%"
+        }
+        return "Starting the secure download…"
     }
 }
 

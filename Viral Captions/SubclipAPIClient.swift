@@ -1,11 +1,12 @@
+import BetterAuth
 import Foundation
 
 struct SubclipAPIClient {
     var baseURL = URL(string: "https://www.subclip.app")!
+    let authClient: BetterAuthClient
 
-    func createUpload(apiKey: String, payload: CreateUploadRequest) async throws -> UploadResponse {
+    func createUpload(payload: CreateUploadRequest) async throws -> UploadResponse {
         try await jsonRequest(
-            apiKey: apiKey,
             path: "/api/v1/dynamic-captions/uploads",
             method: "POST",
             body: payload,
@@ -13,9 +14,8 @@ struct SubclipAPIClient {
         )
     }
 
-    func startJob(apiKey: String, payload: StartJobRequest) async throws -> StartJobResponse {
+    func startJob(payload: StartJobRequest) async throws -> StartJobResponse {
         try await jsonRequest(
-            apiKey: apiKey,
             path: "/api/v1/dynamic-captions/jobs",
             method: "POST",
             body: payload,
@@ -23,9 +23,8 @@ struct SubclipAPIClient {
         )
     }
 
-    func jobStatus(apiKey: String, projectId: String) async throws -> JobStatusResponse {
+    func jobStatus(projectId: String) async throws -> JobStatusResponse {
         try await jsonRequest(
-            apiKey: apiKey,
             path: "/api/v1/dynamic-captions/jobs/\(projectId)",
             method: "GET",
             body: Optional<EmptyBody>.none,
@@ -33,9 +32,8 @@ struct SubclipAPIClient {
         )
     }
 
-    func downloadInfo(apiKey: String, projectId: String) async throws -> DownloadInfoResponse {
+    func downloadInfo(projectId: String) async throws -> DownloadInfoResponse {
         try await jsonRequest(
-            apiKey: apiKey,
             path: "/api/v1/dynamic-captions/jobs/\(projectId)/download",
             method: "GET",
             body: Optional<EmptyBody>.none,
@@ -43,9 +41,8 @@ struct SubclipAPIClient {
         )
     }
 
-    func quota(apiKey: String) async throws -> QuotaResponse {
+    func quota() async throws -> QuotaResponse {
         try await jsonRequest(
-            apiKey: apiKey,
             path: "/api/v1/quota",
             method: "GET",
             body: Optional<EmptyBody>.none,
@@ -53,37 +50,44 @@ struct SubclipAPIClient {
         )
     }
 
-    func uploadFile(fileURL: URL, uploadURL: URL, contentType: String, fileSize: Int64) async throws {
+    func billingAccess() async throws -> BillingAccessResponse {
+        try await jsonRequest(
+            path: "/api/v1/billing/access",
+            method: "GET",
+            body: Optional<EmptyBody>.none,
+            responseType: BillingAccessResponse.self
+        )
+    }
+
+    func uploadFile(
+        fileURL: URL,
+        uploadURL: URL,
+        contentType: String,
+        fileSize: Int64,
+        progress: @MainActor @escaping @Sendable (Double) -> Void
+    ) async throws {
         var request = URLRequest(url: uploadURL)
         request.httpMethod = "PUT"
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         request.setValue(String(fileSize), forHTTPHeaderField: "Content-Length")
         request.timeoutInterval = 60 * 60
 
-        let (_, response) = try await URLSession.shared.upload(for: request, fromFile: fileURL)
-        guard let http = response as? HTTPURLResponse else {
-            throw SubclipAPIError(message: "Upload failed before a server response was received.")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            throw SubclipAPIError(message: "Upload failed with HTTP \(http.statusCode).")
-        }
+        try await FastMediaUploader.upload(fileURL: fileURL, request: request, progress: progress)
     }
 
-    func downloadFile(from remoteURL: URL, suggestedFileName: String) async throws -> URL {
-        let (temporaryURL, response) = try await URLSession.shared.download(from: remoteURL)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw SubclipAPIError(message: "Download failed.")
-        }
-
+    func downloadFile(
+        from remoteURL: URL,
+        suggestedFileName: String,
+        progress: @MainActor @escaping @Sendable (Double?) -> Void
+    ) async throws -> URL {
         let directory = try outputDirectory()
         let fileName = sanitizedFileName(suggestedFileName, fallback: "captioned-video.mp4")
         let destination = directory.appendingPathComponent(fileName)
-        let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
-        try fileManager.moveItem(at: temporaryURL, to: destination)
-        return destination
+        return try await FastMediaDownloader.download(
+            from: remoteURL,
+            to: destination,
+            progress: progress
+        )
     }
 
     private func outputDirectory() throws -> URL {
@@ -98,7 +102,6 @@ struct SubclipAPIClient {
     }
 
     private func jsonRequest<Body: Encodable, Response: Decodable>(
-        apiKey: String,
         path: String,
         method: String,
         body: Body?,
@@ -107,7 +110,11 @@ struct SubclipAPIClient {
         let url = baseURL.appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        guard let cookie = authClient.getCookie() else {
+            throw SubclipAPIError(message: "Your Subclip session expired. Sign in again.", code: "session_expired", statusCode: 401)
+        }
+        request.setValue("\(cookie.name)=\(cookie.value)", forHTTPHeaderField: "Cookie")
+        request.setValue("subclip://", forHTTPHeaderField: "Origin")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 90
 
@@ -265,4 +272,12 @@ struct QuotaResponse: Decodable, Equatable {
     let storage: Storage?
     let uploadCheck: UploadCheck?
     let aiCredits: AICredits
+}
+
+struct BillingAccessResponse: Decodable, Equatable {
+    let status: String
+    let source: String
+    let hasPolarAccess: Bool
+    let shouldShowRevenueCat: Bool
+    let message: String?
 }
