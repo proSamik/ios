@@ -51,7 +51,7 @@ final class ViralCaptionsViewModel: ObservableObject {
     @Published var aspectRatio: OutputAspectRatio = .vertical
     @Published var placement: CaptionPlacement = .none
     @Published var faceTrack = true
-    @Published var autoTranscribe = false
+    @Published var cloudTranscribe = false
     @Published var outputFileName = ""
     @Published var phase: RenderPhase = .idle
     @Published var statusMessage = "Choose a video to begin."
@@ -126,9 +126,10 @@ final class ViralCaptionsViewModel: ObservableObject {
         guard let durationSeconds = selectedVideo?.metadata.durationSeconds else { return nil }
         let minutes = max(1.0 / 60.0, max(0, durationSeconds) / 60.0)
         let renderCredits = minutes
-        // Export generates and uploads an SRT locally when one is not supplied,
-        // so the server does not need to charge for cloud transcription.
-        let transcriptionCredits = 0.0
+        // With Cloud Transcribe enabled and no supplied transcript, the server
+        // performs transcription. Otherwise export prepares a missing transcript
+        // locally before uploading the render request.
+        let transcriptionCredits = cloudTranscribe && selectedSRT == nil ? minutes : 0.0
         let analysisCredits = 1.0
         let faceTrackCredits = effectiveFaceTrack ? max(1.0, minutes) : 0
         let total = max(2.0, renderCredits + transcriptionCredits + analysisCredits + faceTrackCredits)
@@ -170,8 +171,8 @@ final class ViralCaptionsViewModel: ObservableObject {
         faceTrack = isEnabled
     }
 
-    func setAutoTranscribe(_ isEnabled: Bool) {
-        autoTranscribe = isEnabled
+    func setCloudTranscribe(_ isEnabled: Bool) {
+        cloudTranscribe = isEnabled
     }
 
     func refreshQuota() async {
@@ -530,7 +531,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
 
         do {
-            if selectedSRT == nil {
+            if selectedSRT == nil && !cloudTranscribe {
                 phase = .readingMedia
                 progress = 0.03
                 statusMessage = "Transcribing audio locally…"

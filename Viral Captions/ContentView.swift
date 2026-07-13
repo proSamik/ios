@@ -2508,18 +2508,18 @@ private struct ExportPreparationCard: View {
 
                 Toggle(
                     isOn: Binding(
-                        get: { viewModel.autoTranscribe },
-                        set: { viewModel.setAutoTranscribe($0) }
+                        get: { viewModel.cloudTranscribe },
+                        set: { viewModel.setCloudTranscribe($0) }
                     )
                 ) {
-                    Label("Auto Transcribe", systemImage: "waveform")
+                    Label("Cloud Transcribe", systemImage: "waveform")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(Brand.ink)
                 }
                 .padding(12)
                 .nativeGlassPanel(cornerRadius: 8, interactive: true)
 
-                if !viewModel.autoTranscribe {
+                if !viewModel.cloudTranscribe {
                     VStack(alignment: .leading, spacing: 10) {
                         LocalTranscriptionControl(viewModel: viewModel)
                         SRTAttachmentControl(viewModel: viewModel, onPickSRT: onPickSRT)
@@ -2528,7 +2528,7 @@ private struct ExportPreparationCard: View {
                 }
             }
         }
-        .animation(.spring(response: 0.30, dampingFraction: 0.86), value: viewModel.autoTranscribe)
+        .animation(.spring(response: 0.30, dampingFraction: 0.86), value: viewModel.cloudTranscribe)
     }
 }
 
