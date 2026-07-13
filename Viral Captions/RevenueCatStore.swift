@@ -13,6 +13,9 @@ final class RevenueCatStore: ObservableObject {
     @Published var errorMessage: String?
 
     private static let entitlementID = "premium"
+    // RevenueCat's public Apple SDK key. This is safe to ship in the app.
+    // App Store Connect keys and RevenueCat secret keys must remain server-side.
+    private static let applePublicSDKKey = "appl_dDGhBfEHRRYGBUhOrBzpudOMIdJ"
     private var configuredUserID: String?
 
     func configure(userID: String, email: String? = nil, displayName: String? = nil) async {
@@ -21,13 +24,10 @@ final class RevenueCatStore: ObservableObject {
         if configuredUserID != userID {
             #if DEBUG
             Purchases.logLevel = .debug
-            let apiKey = "test_XGQynQKFINvKcmyjliZSgklSroc"
-            #else
-            let apiKey = "appl_dDGhBfEHRRYGBUhOrBzpudOMIdJ"
             #endif
 
             if !Purchases.isConfigured {
-                Purchases.configure(withAPIKey: apiKey, appUserID: userID)
+                Purchases.configure(withAPIKey: Self.applePublicSDKKey, appUserID: userID)
             } else {
                 do {
                     _ = try await Purchases.shared.logIn(userID)
