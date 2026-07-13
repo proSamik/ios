@@ -167,6 +167,7 @@ struct SubclipAPIClient {
         }
         request.setValue("\(cookie.name)=\(cookie.value)", forHTTPHeaderField: "Cookie")
         request.setValue("subclip://", forHTTPHeaderField: "Origin")
+        request.setValue("ios-app", forHTTPHeaderField: "X-Subclip-Client")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 90
 
