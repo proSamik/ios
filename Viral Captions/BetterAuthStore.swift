@@ -108,6 +108,17 @@ final class BetterAuthStore: ObservableObject {
             }
         } catch {
             if let apiError = error as? BetterAuthApiError,
+               apiError.code == "ALREADY_REGISTERED" ||
+               apiError.code == "USER_ALREADY_EXISTS" ||
+               apiError.localizedDescription.localizedCaseInsensitiveContains("already registered") ||
+               apiError.localizedDescription.localizedCaseInsensitiveContains("already exists") {
+                needsVerification = false
+                verificationCode = ""
+                UserDefaults.standard.removeObject(forKey: Self.pendingIOSWelcomeEmailKey)
+                message = "Already registered"
+                return
+            }
+            if let apiError = error as? BetterAuthApiError,
                apiError.code == "EMAIL_NOT_VERIFIED" {
                 needsVerification = true
                 try? await sendVerificationCode(to: normalizedEmail)
