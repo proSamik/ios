@@ -11,7 +11,6 @@ import AppKit
 import CoreTransferable
 import Photos
 import PhotosUI
-import RevenueCat
 import RevenueCatUI
 import UIKit
 #endif
@@ -29,8 +28,6 @@ struct ContentView: View {
     @State private var selectedVideoItem: PhotosPickerItem?
     @StateObject private var revenueCat = RevenueCatStore()
     @State private var isShowingRevenueCatPaywall = false
-    @State private var activeCheckoutProductID: String?
-    @State private var activeCheckoutProductName: String?
     #endif
 
     private var appearanceMode: AppAppearance {
@@ -135,37 +132,10 @@ struct ContentView: View {
         Group {
             if let offering = revenueCat.offering {
                 PaywallView(offering: offering, displayCloseButton: true)
-                    .onPurchaseStarted { package in
-                        activeCheckoutProductID = package.storeProduct.productIdentifier
-                        activeCheckoutProductName = package.storeProduct.localizedTitle
-                        Task {
-                            await viewModel.reportRevenueCatCheckout(
-                                event: .started,
-                                productID: package.storeProduct.productIdentifier,
-                                productName: package.storeProduct.localizedTitle
-                            )
-                        }
-                    }
                     .onPurchaseCompleted { _ in
-                        activeCheckoutProductID = nil
-                        activeCheckoutProductName = nil
                         revenueCat.markPurchaseCompleted()
                         isShowingRevenueCatPaywall = false
                         Task { await viewModel.resumePreparedResultAfterPurchase() }
-                    }
-                    .onPurchaseFailure { error in
-                        Task {
-                            await viewModel.reportRevenueCatCheckout(
-                                event: .failed,
-                                productID: activeCheckoutProductID,
-                                productName: activeCheckoutProductName,
-                                error: error.localizedDescription
-                            )
-                        }
-                    }
-                    .onPurchaseCancelled {
-                        activeCheckoutProductID = nil
-                        activeCheckoutProductName = nil
                     }
                     .onRestoreCompleted { _ in
                         Task {
