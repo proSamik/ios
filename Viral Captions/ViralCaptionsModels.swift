@@ -368,18 +368,26 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
 }
 
 enum LocalUploadQueueStore {
-    private static let key = "localUploadQueue"
+    private static let legacyUnscopedKey = "localUploadQueue"
     private static let limit = 20
 
-    static func load() -> [LocalUploadQueueItem] {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
+    private static func key(for userID: String) -> String {
+        "localUploadQueue.user.\(sanitizedFileName(userID, fallback: "unknown"))"
+    }
+
+    static func discardLegacyUnscopedHistory() {
+        UserDefaults.standard.removeObject(forKey: legacyUnscopedKey)
+    }
+
+    static func load(userID: String) -> [LocalUploadQueueItem] {
+        guard let data = UserDefaults.standard.data(forKey: key(for: userID)) else { return [] }
         return (try? JSONDecoder().decode([LocalUploadQueueItem].self, from: data)) ?? []
     }
 
-    static func save(_ items: [LocalUploadQueueItem]) {
+    static func save(_ items: [LocalUploadQueueItem], userID: String) {
         let trimmed = Array(items.prefix(limit))
         guard let data = try? JSONEncoder().encode(trimmed) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        UserDefaults.standard.set(data, forKey: key(for: userID))
     }
 }
 

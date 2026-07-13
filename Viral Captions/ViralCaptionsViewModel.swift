@@ -90,11 +90,13 @@ final class ViralCaptionsViewModel: ObservableObject {
     private var transcriptionTask: Task<Void, Never>?
     private var outputCacheTask: Task<URL?, Never>?
     private var importedVideoURL: URL?
+    private var activeLocalUserID: String?
     init() {
         let auth = BetterAuthStore()
         self.auth = auth
         self.client = SubclipAPIClient(authClient: auth.client)
-        self.uploadQueue = LocalUploadQueueStore.load()
+        LocalUploadQueueStore.discardLegacyUnscopedHistory()
+        self.uploadQueue = []
         self.authObservation = auth.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -345,7 +347,19 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     func clearUploadQueue() {
         uploadQueue.removeAll()
-        LocalUploadQueueStore.save(uploadQueue)
+        persistUploadQueue()
+    }
+
+    func activateLocalAccount(_ userID: String?) {
+        guard activeLocalUserID != userID else { return }
+        releaseVideoScope()
+        selectedVideo = nil
+        removeSRT()
+        importedVideoURL = nil
+        outputFileName = ""
+        resetResult()
+        activeLocalUserID = userID
+        uploadQueue = userID.map { LocalUploadQueueStore.load(userID: $0) } ?? []
     }
 
     private func setVideo(from url: URL, alreadyLocal: Bool) async {
@@ -785,7 +799,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             if let projectId,
                let cachedURL = client.cachedOutputFileURL(
                 suggestedFileName: outputFileName,
-                projectId: projectId,
+                projectId: cacheProjectID(projectId),
                 expectedSize: outputFileSize,
                 cacheExpiresAt: cachedItem?.cachedOutputExpiresAt
             ) {
@@ -807,7 +821,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             let localURL = try await client.downloadFile(
                 from: outputRemoteURL,
                 suggestedFileName: outputFileName,
-                projectId: projectId
+                projectId: projectId.map(cacheProjectID)
             ) { [weak self] progress in
                 self?.outputDownloadProgress = progress
             }
@@ -870,7 +884,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         let cachedFileName = item.outputFileName ?? "captioned-video.mp4"
         if let cachedURL = client.cachedOutputFileURL(
             suggestedFileName: cachedFileName,
-            projectId: item.projectId,
+            projectId: cacheProjectID(item.projectId),
             expectedSize: item.outputFileSize,
             cacheExpiresAt: item.cachedOutputExpiresAt
         ) {
@@ -905,7 +919,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             let fileName = info.fileName ?? item.outputFileName ?? "captioned-video.mp4"
             if let cachedURL = client.cachedOutputFileURL(
                 suggestedFileName: fileName,
-                projectId: item.projectId,
+                projectId: cacheProjectID(item.projectId),
                 expectedSize: info.fileSize,
                 cacheExpiresAt: item.cachedOutputExpiresAt
             ) {
@@ -1067,7 +1081,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             ),
             at: 0
         )
-        LocalUploadQueueStore.save(uploadQueue)
+        persistUploadQueue()
     }
 
     private func updateQueueItem(
@@ -1096,7 +1110,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         if let cachedOutputExpiresAt {
             uploadQueue[index].cachedOutputExpiresAt = cachedOutputExpiresAt
         }
-        LocalUploadQueueStore.save(uploadQueue)
+        persistUploadQueue()
     }
 
     private func localOutputCacheExpirationDate(from baseDate: Date = Date()) -> Date {
@@ -1127,6 +1141,16 @@ final class ViralCaptionsViewModel: ObservableObject {
 
     private func queueItem(for projectId: String) -> LocalUploadQueueItem? {
         uploadQueue.first(where: { $0.projectId == projectId })
+    }
+
+    private func persistUploadQueue() {
+        guard let userID = activeLocalUserID else { return }
+        LocalUploadQueueStore.save(uploadQueue, userID: userID)
+    }
+
+    private func cacheProjectID(_ projectId: String) -> String {
+        guard let userID = activeLocalUserID else { return projectId }
+        return "\(userID)_\(projectId)"
     }
 
     private func downloadExpiryDate(from info: DownloadInfoResponse) -> Date {

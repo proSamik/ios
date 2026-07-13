@@ -64,7 +64,11 @@ struct ContentView: View {
                 handleImport(result, mediaType: .srt)
             }
             .onChange(of: viewModel.outputRemoteURL) { _, remoteURL in
-                isShowingResultScreen = remoteURL != nil
+                // Clearing the previous URL is part of opening another cached
+                // history item and must not dismiss the result overlay.
+                if remoteURL != nil {
+                    isShowingResultScreen = true
+                }
             }
             .alert(item: $viewModel.alert) { message in
                 Alert(
@@ -80,6 +84,7 @@ struct ContentView: View {
                 guard viewModel.auth.isAuthenticated,
                       let userID = viewModel.auth.session?.user.id
                 else { return }
+                viewModel.activateLocalAccount(userID)
                 await viewModel.bootstrapMobileAccount()
                 await revenueCat.configure(
                     userID: userID,
@@ -97,6 +102,7 @@ struct ContentView: View {
             }
             .onChange(of: viewModel.auth.isAuthenticated) { _, isAuthenticated in
                 if !isAuthenticated {
+                    viewModel.activateLocalAccount(nil)
                     revenueCat.reset()
                     isShowingRevenueCatPaywall = false
                     isShowingResultScreen = false
@@ -3449,6 +3455,8 @@ private struct FullScreenVideoPlayer: View {
     @Binding var isPresented: Bool
     var showsWatermark = false
     @State private var player = AVPlayer()
+    @State private var isPreparing = true
+    @State private var preparationTask: Task<Void, Never>?
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -3456,6 +3464,20 @@ private struct FullScreenVideoPlayer: View {
 
             VideoPlayer(player: player)
                 .ignoresSafeArea()
+
+            if isPreparing {
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(.white)
+                    Text("Preparing preview…")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 16)
+                .background(.black.opacity(0.55), in: Capsule())
+            }
 
             if showsWatermark {
                 ResultWatermark()
@@ -3476,11 +3498,27 @@ private struct FullScreenVideoPlayer: View {
             .padding()
         }
         .onAppear {
-            player.replaceCurrentItem(with: AVPlayerItem(url: url))
-            player.isMuted = false
-            player.play()
+            isPreparing = true
+            preparationTask?.cancel()
+            preparationTask = Task { @MainActor in
+                let asset = AVURLAsset(url: url)
+                guard (try? await asset.load(.isPlayable)) == true, !Task.isCancelled else { return }
+                player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
+                player.isMuted = false
+                player.automaticallyWaitsToMinimizeStalling = true
+                player.play()
+            }
+        }
+        .onReceive(player.publisher(for: \.timeControlStatus)) { status in
+            if status == .playing {
+                isPreparing = false
+            } else if status == .waitingToPlayAtSpecifiedRate {
+                isPreparing = true
+            }
         }
         .onDisappear {
+            preparationTask?.cancel()
+            preparationTask = nil
             player.pause()
             player.replaceCurrentItem(with: nil)
         }
@@ -3490,10 +3528,10 @@ private struct FullScreenVideoPlayer: View {
 private struct ResultWatermark: View {
     var body: some View {
         Text("subclip.app")
-            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .font(.system(size: 15, weight: .bold, design: .rounded))
             .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay {
                 Capsule().stroke(.white.opacity(0.28), lineWidth: 0.8)

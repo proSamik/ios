@@ -48,15 +48,17 @@ final class BetterAuthStore: ObservableObject {
             isLoading = false
             hasRestoredSession = true
         }
-        await withTaskGroup(of: Void.self) { group in
-            group.addTask { @MainActor [client] in
-                await client.session.refreshSession()
+        // CookieStorage loads the persisted BetterAuth cookie from Keychain
+        // during client initialization. Do not race/cancel the first session
+        // request after two seconds: that caused valid restored cookies to be
+        // followed by `Session updated: nil` on slower rebuild launches.
+        guard client.getCookie() != nil else { return }
+        for attempt in 0..<3 {
+            await client.session.refreshSession()
+            if client.session.data != nil { break }
+            if attempt < 2 {
+                try? await Task.sleep(for: .milliseconds(650))
             }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(2))
-            }
-            _ = await group.next()
-            group.cancelAll()
         }
     }
 
