@@ -11,6 +11,7 @@ import AppKit
 import CoreTransferable
 import Photos
 import PhotosUI
+import RevenueCat
 import RevenueCatUI
 import UIKit
 #endif
@@ -28,6 +29,8 @@ struct ContentView: View {
     @State private var selectedVideoItem: PhotosPickerItem?
     @StateObject private var revenueCat = RevenueCatStore()
     @State private var isShowingRevenueCatPaywall = false
+    @State private var activeCheckoutProductID: String?
+    @State private var activeCheckoutProductName: String?
     #endif
 
     private var appearanceMode: AppAppearance {
@@ -132,10 +135,37 @@ struct ContentView: View {
         Group {
             if let offering = revenueCat.offering {
                 PaywallView(offering: offering, displayCloseButton: true)
+                    .onPurchaseStarted { package in
+                        activeCheckoutProductID = package.storeProduct.productIdentifier
+                        activeCheckoutProductName = package.storeProduct.localizedTitle
+                        Task {
+                            await viewModel.reportRevenueCatCheckout(
+                                event: .started,
+                                productID: package.storeProduct.productIdentifier,
+                                productName: package.storeProduct.localizedTitle
+                            )
+                        }
+                    }
                     .onPurchaseCompleted { _ in
+                        activeCheckoutProductID = nil
+                        activeCheckoutProductName = nil
                         revenueCat.markPurchaseCompleted()
                         isShowingRevenueCatPaywall = false
                         Task { await viewModel.resumePreparedResultAfterPurchase() }
+                    }
+                    .onPurchaseFailure { error in
+                        Task {
+                            await viewModel.reportRevenueCatCheckout(
+                                event: .failed,
+                                productID: activeCheckoutProductID,
+                                productName: activeCheckoutProductName,
+                                error: error.localizedDescription
+                            )
+                        }
+                    }
+                    .onPurchaseCancelled {
+                        activeCheckoutProductID = nil
+                        activeCheckoutProductName = nil
                     }
                     .onRestoreCompleted { _ in
                         Task {
@@ -188,7 +218,7 @@ struct ContentView: View {
         guard let userID = viewModel.auth.session?.user.id else { return }
         do {
             let access = try await viewModel.billingAccess()
-            guard access.shouldShowRevenueCat && !access.hasPreviousPass else { return }
+            guard access.shouldShowRevenueCat && !access.hasPurchaseHistory else { return }
 
             revenueCat.lockAccess()
             await revenueCat.configure(userID: userID)
@@ -3457,13 +3487,18 @@ private struct FullScreenVideoPlayer: View {
     @State private var player = AVPlayer()
     @State private var isPreparing = true
     @State private var preparationTask: Task<Void, Never>?
+    @State private var videoAspectRatio: CGFloat = 9.0 / 16.0
 
     var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Color.black.ignoresSafeArea()
+        GeometryReader { proxy in
+            let videoSize = aspectFitSize(for: videoAspectRatio, in: proxy.size)
 
-            VideoPlayer(player: player)
-                .ignoresSafeArea()
+            ZStack(alignment: .topTrailing) {
+                Color.black.ignoresSafeArea()
+
+                VideoPlayer(player: player)
+                    .frame(width: videoSize.width, height: videoSize.height)
+                    .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
 
             if isPreparing {
                 VStack(spacing: 12) {
@@ -3479,11 +3514,13 @@ private struct FullScreenVideoPlayer: View {
                 .background(.black.opacity(0.55), in: Capsule())
             }
 
-            if showsWatermark {
-                ResultWatermark()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                    .padding(20)
-            }
+                if showsWatermark {
+                    ResultWatermark(isLarge: true)
+                        .position(
+                            x: (proxy.size.width - videoSize.width) / 2 + 86,
+                            y: (proxy.size.height + videoSize.height) / 2 - 42
+                        )
+                }
 
             Button {
                 isPresented = false
@@ -3496,6 +3533,7 @@ private struct FullScreenVideoPlayer: View {
             }
             .buttonStyle(.plain)
             .padding()
+            }
         }
         .onAppear {
             isPreparing = true
@@ -3503,6 +3541,16 @@ private struct FullScreenVideoPlayer: View {
             preparationTask = Task { @MainActor in
                 let asset = AVURLAsset(url: url)
                 guard (try? await asset.load(.isPlayable)) == true, !Task.isCancelled else { return }
+                if let track = try? await asset.loadTracks(withMediaType: .video).first,
+                   let naturalSize = try? await track.load(.naturalSize),
+                   let transform = try? await track.load(.preferredTransform) {
+                    let transformed = naturalSize.applying(transform)
+                    let width = abs(transformed.width)
+                    let height = abs(transformed.height)
+                    if width > 0, height > 0 {
+                        videoAspectRatio = width / height
+                    }
+                }
                 player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
                 player.isMuted = false
                 player.automaticallyWaitsToMinimizeStalling = true
@@ -3523,15 +3571,25 @@ private struct FullScreenVideoPlayer: View {
             player.replaceCurrentItem(with: nil)
         }
     }
+
+    private func aspectFitSize(for aspectRatio: CGFloat, in container: CGSize) -> CGSize {
+        guard aspectRatio > 0, container.width > 0, container.height > 0 else { return container }
+        if container.width / container.height > aspectRatio {
+            return CGSize(width: container.height * aspectRatio, height: container.height)
+        }
+        return CGSize(width: container.width, height: container.width / aspectRatio)
+    }
 }
 
 private struct ResultWatermark: View {
+    var isLarge = false
+
     var body: some View {
         Text("subclip.app")
-            .font(.system(size: 15, weight: .bold, design: .rounded))
+            .font(.system(size: isLarge ? 19 : 15, weight: .bold, design: .rounded))
             .foregroundStyle(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.horizontal, isLarge ? 20 : 16)
+            .padding(.vertical, isLarge ? 12 : 10)
             .background(.ultraThinMaterial, in: Capsule())
             .overlay {
                 Capsule().stroke(.white.opacity(0.28), lineWidth: 0.8)

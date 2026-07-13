@@ -68,6 +68,26 @@ struct SubclipAPIClient {
         )
     }
 
+    func reportRevenueCatCheckout(
+        event: RevenueCatCheckoutEvent,
+        productID: String?,
+        productName: String?,
+        error: String? = nil
+    ) async throws {
+        _ = try await jsonRequest(
+            path: "/api/v1/billing/purchase-event",
+            method: "POST",
+            body: RevenueCatCheckoutEventRequest(
+                event: event.rawValue,
+                productId: productID,
+                productName: productName,
+                error: error,
+                environment: "ios"
+            ),
+            responseType: RevenueCatCheckoutEventResponse.self
+        )
+    }
+
     func bootstrapMobileAccount(grantWelcomeCredits: Bool) async throws -> MobileBootstrapResponse {
         try await jsonRequest(
             path: "/api/v1/mobile/bootstrap",
@@ -330,14 +350,33 @@ struct QuotaResponse: Decodable, Equatable {
 struct BillingAccessResponse: Decodable, Equatable {
     let status: String
     let source: String
+    let hasAccess: Bool
     let hasPolarAccess: Bool
     let hasRevenueCatAccess: Bool
     let shouldShowRevenueCat: Bool
-    let hasPreviousPass: Bool
-    let revenueCatExpiresAt: String?
-    let revenueCatLifetime: Bool?
-    let creditsRollover: Bool?
+    let hasPurchaseHistory: Bool
+    let expiresAt: String?
+    let isLifetime: Bool
+    let creditsBalance: Double
+    let creditsRollover: Bool
     let message: String?
+}
+
+enum RevenueCatCheckoutEvent: String {
+    case started = "checkout_started"
+    case failed = "checkout_failed"
+}
+
+private struct RevenueCatCheckoutEventRequest: Encodable {
+    let event: String
+    let productId: String?
+    let productName: String?
+    let error: String?
+    let environment: String
+}
+
+private struct RevenueCatCheckoutEventResponse: Decodable {
+    let received: Bool
 }
 
 private struct MobileBootstrapRequest: Encodable {

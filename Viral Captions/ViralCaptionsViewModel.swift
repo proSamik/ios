@@ -194,6 +194,25 @@ final class ViralCaptionsViewModel: ObservableObject {
         try await client.billingAccess()
     }
 
+    func reportRevenueCatCheckout(
+        event: RevenueCatCheckoutEvent,
+        productID: String?,
+        productName: String?,
+        error: String? = nil
+    ) async {
+        do {
+            try await client.reportRevenueCatCheckout(
+                event: event,
+                productID: productID,
+                productName: productName,
+                error: error
+            )
+        } catch {
+            // Analytics must never interrupt or alter the StoreKit flow.
+            print("RevenueCat checkout notification deferred: \(error.localizedDescription)")
+        }
+    }
+
     func bootstrapMobileAccount() async {
         guard auth.isAuthenticated else { return }
         do {
