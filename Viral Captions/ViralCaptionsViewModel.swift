@@ -1147,6 +1147,10 @@ final class ViralCaptionsViewModel: ObservableObject {
                 downloadExpiresAt: outputDownloadExpiresAt,
                 cachedOutputExpiresAt: item.cachedOutputExpiresAt
             )
+            // History previews may begin from the signed remote preview URL,
+            // but immediately keep a user-scoped local copy for the same
+            // one-hour cache window used by freshly completed renders.
+            cacheCurrentOutput()
             return true
         } catch let error as SubclipAPIError where error.code == "output_not_ready" {
             if Date().timeIntervalSince(item.createdAt) >= LocalUploadQueueItem.incompleteRetentionDuration {
@@ -1377,7 +1381,14 @@ final class ViralCaptionsViewModel: ObservableObject {
         outputFileName: String,
         outputFileSize: Int64?
     ) {
-        markOutputCached(for: projectId, outputFileName: outputFileName, outputFileSize: outputFileSize)
+        updateQueueItem(
+            projectId: projectId,
+            status: "Completed",
+            outputFileName: outputFileName,
+            outputFileSize: outputFileSize,
+            cachedOutputExpiresAt: queueItem(for: projectId)?.cachedOutputExpiresAt
+                ?? localOutputCacheExpirationDate()
+        )
     }
 
     private func queueItem(for projectId: String) -> LocalUploadQueueItem? {

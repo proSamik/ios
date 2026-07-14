@@ -113,11 +113,15 @@ struct SubclipAPIClient {
         expectedSize: Int64?,
         cacheExpiresAt: Date? = nil
     ) -> URL? {
-        if let cacheExpiresAt, Date() >= cacheExpiresAt {
-            return nil
-        }
         do {
             let destination = try outputFileURL(suggestedFileName: suggestedFileName, projectId: projectId)
+            if let cacheExpiresAt, Date() >= cacheExpiresAt {
+                // The cached render is intentionally short-lived. Remove the
+                // expired file as well as rejecting it so History cannot reuse
+                // stale media beyond the one-hour window.
+                try? FileManager.default.removeItem(at: destination)
+                return nil
+            }
             let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
             guard let sizeNumber = attributes[.size] as? NSNumber else { return nil }
             let size = sizeNumber.int64Value

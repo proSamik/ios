@@ -2258,7 +2258,6 @@ private struct SRTAttachmentControl: View {
 private struct LocalQueueCard: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     var onOpen: (LocalUploadQueueItem) -> Void
-    @State private var openingProjectID: String?
 
     var body: some View {
         BrandCard {
@@ -2286,10 +2285,10 @@ private struct LocalQueueCard: View {
                         ForEach(viewModel.uploadQueue) { item in
                             LocalQueueRow(
                                 item: item,
-                                isOpening: openingProjectID == item.projectId,
+                                isOpening: viewModel.isOpeningHistoryPreview
+                                    && viewModel.projectId == item.projectId,
                                 onOpen: {
-                                    guard openingProjectID == nil else { return }
-                                    openingProjectID = item.projectId
+                                    guard !viewModel.isOpeningHistoryPreview else { return }
                                     onOpen(item)
                                 }
                             )
@@ -2301,26 +2300,6 @@ private struct LocalQueueCard: View {
         .task {
             await viewModel.reconcileUploadQueue()
         }
-        .onChange(of: viewModel.outputRemoteURL) { _, remoteURL in
-            if remoteURL != nil {
-                openingProjectID = nil
-            }
-        }
-        .onChange(of: viewModel.outputURL) { _, localURL in
-            if localURL != nil {
-                openingProjectID = nil
-            }
-        }
-        .onChange(of: viewModel.isOpeningHistoryPreview) { _, isOpening in
-            if !isOpening {
-                openingProjectID = nil
-            }
-        }
-        .onChange(of: viewModel.alert?.id) { _, alertID in
-            if alertID != nil {
-                openingProjectID = nil
-            }
-        }
     }
 }
 
@@ -2331,60 +2310,56 @@ private struct LocalQueueRow: View {
 
     var body: some View {
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Image(systemName: "video.fill")
-                        .foregroundStyle(Brand.navy)
+            HStack(spacing: 14) {
+                Image(systemName: "video.fill")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Brand.navy)
+                    .frame(width: 44, height: 44)
+                    .background(Brand.navy.opacity(0.09), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 5) {
                     Text(item.fileName)
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
                         .foregroundStyle(Brand.ink)
                         .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text(item.status)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(.secondary)
+                        .truncationMode(.middle)
+                    Text(item.createdAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(Brand.slate)
                 }
 
-                HStack(spacing: 8) {
-                    MetricPill(text: item.aspectRatio, systemImage: "rectangle.on.rectangle")
-                    MetricPill(text: item.templateId, systemImage: "sparkles")
-                    if let creditsLabel = item.creditsLabel {
-                        MetricPill(text: creditsLabel, systemImage: "sparkles.tv")
-                    }
-                    if let timeRemaining = item.downloadTimeRemainingLabel {
-                        MetricPill(text: timeRemaining, systemImage: "timer")
-                    }
-                    if let outputFileName = item.outputFileName {
-                        MetricPill(text: outputFileName, systemImage: "square.and.arrow.down")
+                Spacer(minLength: 8)
+
+                Group {
+                    if isOpening {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Brand.navy)
+                    } else {
+                        Image(systemName: item.isResultReady ? "play.fill" : "arrow.clockwise")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Brand.navy)
                     }
                 }
-
-                if item.canOpenOrRefreshResult {
-                    HStack(spacing: 8) {
-                        if isOpening {
-                            ProgressView()
-                                .controlSize(.small)
-                                .tint(Brand.navy)
-                        } else {
-                            Image(systemName: "play.rectangle.fill")
-                        }
-                        Text(
-                            isOpening
-                                ? "Checking result…"
-                                : item.isResultReady ? "Open result" : "Check result"
-                        )
-                    }
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .nativeGlassCapsule(interactive: true)
+                .frame(width: 42, height: 42)
+                .background(Brand.surface.opacity(0.75), in: Circle())
+                .overlay {
+                    Circle()
+                        .stroke(Brand.line, lineWidth: 1)
                 }
             }
-            .padding(10)
-            .nativeGlassPanel(cornerRadius: 8, interactive: true)
+            .padding(12)
+            .nativeGlassPanel(cornerRadius: 16, interactive: true)
         }
         .buttonStyle(.plain)
         .disabled(!item.canOpenOrRefreshResult || isOpening)
+        .accessibilityLabel(
+            isOpening
+                ? "Checking result for \(item.fileName)"
+                : item.isResultReady
+                    ? "Open result for \(item.fileName)"
+                    : "Check result for \(item.fileName)"
+        )
     }
 }
 
@@ -2865,6 +2840,9 @@ private struct RenderProgressPreview: View {
             configurePlayer()
         }
         .onDisappear {
+            // A full-screen presentation uses this same prepared player. Do
+            // not tear its item down while the cover transition is occurring.
+            guard !isShowingFullPlayer else { return }
             playbackKickTask?.cancel()
             playbackKickTask = nil
             player?.pause()
@@ -2887,13 +2865,23 @@ private struct RenderProgressPreview: View {
         #if os(iOS)
         .fullScreenCover(isPresented: $isShowingFullPlayer) {
             if let url {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
+                FullScreenVideoPlayer(
+                    url: url,
+                    isPresented: $isShowingFullPlayer,
+                    showsWatermark: showsWatermark,
+                    preparedPlayer: player
+                )
             }
         }
         #else
         .sheet(isPresented: $isShowingFullPlayer) {
             if let url {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
+                FullScreenVideoPlayer(
+                    url: url,
+                    isPresented: $isShowingFullPlayer,
+                    showsWatermark: showsWatermark,
+                    preparedPlayer: player
+                )
                     .frame(minWidth: 720, minHeight: 520)
             }
         }
@@ -3428,18 +3416,29 @@ private struct VideoPreview: View {
             configurePlayer()
         }
         .onDisappear {
+            guard !isShowingFullPlayer else { return }
             stopPlayback()
         }
         #if os(iOS)
         .fullScreenCover(isPresented: $isShowingFullPlayer) {
             if let url {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
+                FullScreenVideoPlayer(
+                    url: url,
+                    isPresented: $isShowingFullPlayer,
+                    showsWatermark: showsWatermark,
+                    preparedPlayer: player
+                )
             }
         }
         #else
         .sheet(isPresented: $isShowingFullPlayer) {
             if let url {
-                FullScreenVideoPlayer(url: url, isPresented: $isShowingFullPlayer, showsWatermark: showsWatermark)
+                FullScreenVideoPlayer(
+                    url: url,
+                    isPresented: $isShowingFullPlayer,
+                    showsWatermark: showsWatermark,
+                    preparedPlayer: player
+                )
                     .frame(minWidth: 720, minHeight: 520)
             }
         }
@@ -3468,10 +3467,16 @@ private struct FullScreenVideoPlayer: View {
     let url: URL
     @Binding var isPresented: Bool
     var showsWatermark = false
-    @State private var player = AVPlayer()
+    var preparedPlayer: AVPlayer? = nil
+    @State private var standalonePlayer = AVPlayer()
     @State private var isPreparing = true
     @State private var preparationTask: Task<Void, Never>?
     @State private var videoAspectRatio: CGFloat = 9.0 / 16.0
+    @State private var preparedPlayerWasMuted = true
+
+    private var player: AVPlayer {
+        preparedPlayer ?? standalonePlayer
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -3520,25 +3525,32 @@ private struct FullScreenVideoPlayer: View {
             }
         }
         .onAppear {
-            isPreparing = true
             preparationTask?.cancel()
+            preparedPlayerWasMuted = player.isMuted
+            player.isMuted = false
+            player.automaticallyWaitsToMinimizeStalling = true
+
+            if let asset = player.currentItem?.asset {
+                // The inline preview has already prepared this player and its
+                // asset. Reuse it immediately instead of parsing and buffering
+                // the same video again for full screen.
+                isPreparing = player.timeControlStatus != .playing
+                player.play()
+                preparationTask = Task { @MainActor in
+                    await updateAspectRatio(from: asset)
+                }
+                return
+            }
+
+            isPreparing = true
             preparationTask = Task { @MainActor in
                 let asset = AVURLAsset(url: url)
                 guard (try? await asset.load(.isPlayable)) == true, !Task.isCancelled else { return }
-                if let track = try? await asset.loadTracks(withMediaType: .video).first,
-                   let naturalSize = try? await track.load(.naturalSize),
-                   let transform = try? await track.load(.preferredTransform) {
-                    let transformed = naturalSize.applying(transform)
-                    let width = abs(transformed.width)
-                    let height = abs(transformed.height)
-                    if width > 0, height > 0 {
-                        videoAspectRatio = width / height
-                    }
-                }
                 player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
                 player.isMuted = false
                 player.automaticallyWaitsToMinimizeStalling = true
                 player.play()
+                await updateAspectRatio(from: asset)
             }
         }
         .onReceive(player.publisher(for: \.timeControlStatus)) { status in
@@ -3551,8 +3563,27 @@ private struct FullScreenVideoPlayer: View {
         .onDisappear {
             preparationTask?.cancel()
             preparationTask = nil
-            player.pause()
-            player.replaceCurrentItem(with: nil)
+            if preparedPlayer != nil {
+                // Keep the inline preview warm when returning from full screen.
+                player.isMuted = preparedPlayerWasMuted
+            } else {
+                player.pause()
+                player.replaceCurrentItem(with: nil)
+            }
+        }
+    }
+
+    @MainActor
+    private func updateAspectRatio(from asset: AVAsset) async {
+        if let track = try? await asset.loadTracks(withMediaType: .video).first,
+           let naturalSize = try? await track.load(.naturalSize),
+           let transform = try? await track.load(.preferredTransform) {
+            let transformed = naturalSize.applying(transform)
+            let width = abs(transformed.width)
+            let height = abs(transformed.height)
+            if width > 0, height > 0 {
+                videoAspectRatio = width / height
+            }
         }
     }
 
