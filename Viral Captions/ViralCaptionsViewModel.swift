@@ -305,14 +305,21 @@ final class ViralCaptionsViewModel: ObservableObject {
             await self.refreshQuota()
             guard !Task.isCancelled else { return }
 
+            // Billing access is the authoritative combined Polar/RevenueCat
+            // balance. Prefer it over a previously cached quota response so an
+            // insufficient-credit paywall appears before any media is uploaded.
+            let billingAccess = try? await self.billingAccess()
             if let required = self.previewEstimatedCredits,
-               let available = self.quotaInfo?.aiCredits.balance,
+               let available = billingAccess?.creditsBalance ?? self.quotaInfo?.aiCredits.balance,
                available + 0.0001 < required {
                 self.phase = .idle
                 self.progress = 0
-                self.statusMessage = "Choose a pass to add AI credits before exporting."
-                self.alert = nil
-                self.passRequiredPaywallRequestID = UUID()
+                self.statusMessage = "More AI credits are required before rendering."
+                self.alert = AppMessage(
+                    title: "Not enough AI credits",
+                    message: "This preview requires \(required.formatted(.number.precision(.fractionLength(0...2)))) credits, but you have \(available.formatted(.number.precision(.fractionLength(0...2)))). Choose a pass to continue."
+                )
+                self.lowCreditsPaywallRequestID = UUID()
                 return
             }
 
@@ -351,6 +358,47 @@ final class ViralCaptionsViewModel: ObservableObject {
         persistUploadQueue()
     }
 
+    func pruneUploadQueue(at date: Date = Date()) {
+        let retained = uploadQueue.filter { $0.shouldRemainInHistory(at: date) }
+        guard retained != uploadQueue else { return }
+        uploadQueue = retained
+        persistUploadQueue()
+    }
+
+    func reconcileUploadQueue(at date: Date = Date()) async {
+        guard auth.isAuthenticated else { return }
+        pruneUploadQueue(at: date)
+
+        // Reconcile uncached local history with the server so a stale local
+        // "Completed" label can never keep a failed or expired render visible.
+        for item in uploadQueue where !item.isCachedOutputStillAvailable {
+            do {
+                let status = try await client.jobStatus(projectId: item.projectId)
+                let normalized = status.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if normalized == "failed"
+                    || normalized == "canceled"
+                    || normalized == "cancelled"
+                    || normalized == "awaiting_upload"
+                    || normalized == "awaiting upload" {
+                    removeQueueItem(projectId: item.projectId)
+                } else if status.outputReady {
+                    updateQueueItem(projectId: item.projectId, status: "Completed")
+                } else if date.timeIntervalSince(item.createdAt) >= LocalUploadQueueItem.incompleteRetentionDuration {
+                    removeQueueItem(projectId: item.projectId)
+                } else {
+                    updateQueueItem(projectId: item.projectId, status: status.normalizedStatus)
+                }
+            } catch let error as SubclipAPIError
+                where error.code == "project_not_found"
+                    && date.timeIntervalSince(item.createdAt) >= LocalUploadQueueItem.incompleteRetentionDuration {
+                removeQueueItem(projectId: item.projectId)
+            } catch {
+                // Keep history during transient network/server failures. It will
+                // be reconciled again on the next account activation or tap.
+            }
+        }
+    }
+
     func activateLocalAccount(_ userID: String?) {
         guard activeLocalUserID != userID else { return }
         releaseVideoScope()
@@ -361,6 +409,7 @@ final class ViralCaptionsViewModel: ObservableObject {
         resetResult()
         activeLocalUserID = userID
         uploadQueue = userID.map { LocalUploadQueueStore.load(userID: $0) } ?? []
+        pruneUploadQueue()
     }
 
     private func setVideo(from url: URL, alreadyLocal: Bool) async {
@@ -634,7 +683,10 @@ final class ViralCaptionsViewModel: ObservableObject {
             let completeStatus = try await pollUntilReady(projectId: upload.projectId)
             creditsUsed = completeStatus.creditsUsed
 
-            let info = try await client.downloadInfo(projectId: upload.projectId)
+            // Preview is intentionally available without an active pass. The
+            // protected download endpoint is requested only after Download or
+            // Share has revalidated billing access.
+            let info = try await previewInfoWhenReady(projectId: upload.projectId)
             outputRemoteURL = info.downloadUrl
             outputSuggestedFileName = info.fileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
             outputDownloadExpiresAt = downloadExpiryDate(from: info)
@@ -642,7 +694,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             resultAspectRatio = aspectRatio
             phase = .completed
             progress = 1
-            statusMessage = "Ready to download."
+            statusMessage = "Preview ready."
             updateQueueItem(
                 projectId: upload.projectId,
                 status: "Completed",
@@ -659,39 +711,134 @@ final class ViralCaptionsViewModel: ObservableObject {
                 updateQueueItem(projectId: projectId, status: "Canceled")
             }
         } catch {
-            if let apiError = error as? SubclipAPIError,
-               apiError.code == "pass_required" {
-                // Rendering has completed; only access to its protected result
-                // is pending. Preserve the project and offer a pass instead of
-                // incorrectly marking the cloud render as failed.
-                phase = .completed
-                progress = 1
-                statusMessage = "Render complete. Choose a pass to download or share."
-                updateQueueItem(projectId: projectId ?? "", status: "Ready — pass required")
-                alert = nil
-                if let projectId {
-                    do {
-                        let preview = try await client.previewInfo(projectId: projectId)
-                        outputRemoteURL = preview.downloadUrl
-                        outputSuggestedFileName = preview.fileName ?? normalizedOutputFileName() ?? "captioned-video.mp4"
-                        outputFileSize = preview.fileSize
-                        resultAspectRatio = aspectRatio
-                    } catch {
-                        alert = AppMessage(title: "Preview unavailable", message: error.localizedDescription)
-                    }
-                }
-                return
+            await handleRenderError(error, projectId: projectId)
+        }
+    }
+
+    private func previewInfoWhenReady(projectId: String) async throws -> DownloadInfoResponse {
+        for attempt in 0..<5 {
+            do {
+                return try await client.previewInfo(projectId: projectId)
+            } catch let error as SubclipAPIError
+                where error.disposition == .processing && attempt < 4 {
+                try await Task.sleep(for: .seconds(attempt + 1))
             }
-            phase = .failed
-            statusMessage = "Render failed."
+        }
+        throw SubclipAPIError(
+            message: "The preview is still being finalized. Check the result again shortly.",
+            code: "output_not_ready",
+            statusCode: 409
+        )
+    }
+
+    private func handleRenderError(_ error: Error, projectId: String?) async {
+        let apiError = error as? SubclipAPIError
+        let disposition: SubclipAPIErrorDisposition
+        if let apiError {
+            disposition = apiError.disposition
+        } else if error is URLError {
+            disposition = .retryable
+        } else {
+            disposition = .unknown
+        }
+
+        switch disposition {
+        case .purchaseRequired:
+            phase = .idle
+            progress = 0
+            statusMessage = "Choose a pass to continue."
+            if let projectId { removeQueueItem(projectId: projectId) }
+            alert = AppMessage(
+                title: "Pass required",
+                message: apiError?.message ?? "Choose an active pass to continue."
+            )
+            passRequiredPaywallRequestID = UUID()
+
+        case .insufficientCredits:
+            phase = .idle
+            progress = 0
+            statusMessage = "More AI credits are required before rendering."
+            if let projectId { removeQueueItem(projectId: projectId) }
+            alert = AppMessage(
+                title: "Not enough AI credits",
+                message: apiError?.message ?? "Choose a pass to add AI credits and continue."
+            )
+            lowCreditsPaywallRequestID = UUID()
+
+        case .authenticationRequired:
+            phase = .idle
+            progress = 0
+            statusMessage = "Sign in again to continue."
+            if let projectId { removeQueueItem(projectId: projectId) }
+            alert = AppMessage(
+                title: "Session expired",
+                message: "Your Subclip session expired. Please sign in again."
+            )
+            await auth.signOut()
+
+        case .processing:
+            phase = .idle
+            progress = 0
+            statusMessage = "Your preview is still processing."
             if let projectId {
-                updateQueueItem(projectId: projectId, status: "Failed")
+                updateQueueItem(projectId: projectId, status: "Processing")
             }
-            alert = AppMessage(title: "Render failed", message: error.localizedDescription)
-            if let apiError = error as? SubclipAPIError,
-               apiError.code == "not_enough_credits" {
-                lowCreditsPaywallRequestID = UUID()
+            alert = AppMessage(
+                title: "Preview is still processing",
+                message: apiError?.message ?? "Subclip is still preparing this result. Check it again shortly."
+            )
+
+        case .retryable:
+            phase = .idle
+            progress = 0
+            let terminalRetryCodes = ["billing_unavailable", "render_timeout", "render_capacity"]
+            let shouldRestartExport = apiError?.code.map(terminalRetryCodes.contains) ?? false
+            statusMessage = shouldRestartExport
+                ? "This export can be retried safely."
+                : "Connection interrupted. Your project is safe."
+            if let projectId {
+                if shouldRestartExport {
+                    removeQueueItem(projectId: projectId)
+                } else {
+                    updateQueueItem(projectId: projectId, status: "Check result")
+                }
             }
+            alert = AppMessage(
+                title: "Please try again",
+                message: apiError?.message ?? (shouldRestartExport
+                    ? "Subclip could not finish this export. Please start it again."
+                    : "Subclip is temporarily unavailable. Your project is safe; try again shortly.")
+            )
+
+        case .userActionRequired:
+            phase = .idle
+            progress = 0
+            statusMessage = "Update the video or export settings and try again."
+            if let projectId { removeQueueItem(projectId: projectId) }
+            alert = AppMessage(
+                title: "Check your export",
+                message: apiError?.message ?? error.localizedDescription
+            )
+
+        case .notFound:
+            phase = .idle
+            progress = 0
+            statusMessage = "This project is no longer available."
+            if let projectId { removeQueueItem(projectId: projectId) }
+            alert = AppMessage(
+                title: "Project unavailable",
+                message: apiError?.message ?? "This project could not be found. Start a new export."
+            )
+
+        case .renderFailed, .unknown:
+            phase = .failed
+            progress = 0
+            statusMessage = "Render failed."
+            if let projectId { removeQueueItem(projectId: projectId) }
+            alert = AppMessage(
+                title: "Render failed",
+                message: apiError?.message ?? error.localizedDescription
+            )
         }
     }
 
@@ -862,8 +1009,8 @@ final class ViralCaptionsViewModel: ObservableObject {
         isOpeningHistoryPreview = true
         defer { isOpeningHistoryPreview = false }
 
-        guard item.isResultReady else {
-            alert = AppMessage(title: "Result unavailable", message: "This render has not completed successfully.")
+        guard item.shouldRemainInHistory() else {
+            removeQueueItem(projectId: item.projectId)
             return false
         }
 
@@ -900,7 +1047,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             projectId = item.projectId
             phase = .completed
             progress = 1
-            statusMessage = "Ready to download."
+            statusMessage = "Preview ready."
             creditsUsed = item.creditsUsed
             outputDownloadProgress = 1
             updateQueueItem(
@@ -916,6 +1063,34 @@ final class ViralCaptionsViewModel: ObservableObject {
         }
 
         do {
+            let status = try await client.jobStatus(projectId: item.projectId)
+            if status.status.lowercased() == "failed" {
+                removeQueueItem(projectId: item.projectId)
+                alert = AppMessage(
+                    title: "Render removed",
+                    message: status.errorMessage ?? "This render failed and was removed from history."
+                )
+                return false
+            }
+            guard status.outputReady else {
+                if Date().timeIntervalSince(item.createdAt) >= LocalUploadQueueItem.incompleteRetentionDuration {
+                    removeQueueItem(projectId: item.projectId)
+                    alert = AppMessage(
+                        title: "Render expired",
+                        message: "This render did not finish within one hour and was removed from history."
+                    )
+                } else {
+                    updateQueueItem(projectId: item.projectId, status: status.normalizedStatus)
+                    alert = AppMessage(
+                        title: "Result is still processing",
+                        message: "Subclip is still preparing this video. Tap Check Result again shortly."
+                    )
+                }
+                phase = .idle
+                statusMessage = "Choose a video to begin."
+                return false
+            }
+
             let info = try await client.previewInfo(projectId: item.projectId)
             let fileName = info.fileName ?? item.outputFileName ?? "captioned-video.mp4"
             if let cachedURL = client.cachedOutputFileURL(
@@ -935,7 +1110,7 @@ final class ViralCaptionsViewModel: ObservableObject {
                 projectId = item.projectId
                 phase = .completed
                 progress = 1
-                statusMessage = "Ready to download."
+                statusMessage = "Preview ready."
                 creditsUsed = item.creditsUsed
                 outputDownloadProgress = 1
                 updateQueueItem(
@@ -961,7 +1136,7 @@ final class ViralCaptionsViewModel: ObservableObject {
             projectId = item.projectId
             phase = .completed
             progress = 1
-            statusMessage = "Ready to download."
+            statusMessage = "Preview ready."
             creditsUsed = item.creditsUsed
             updateQueueItem(
                 projectId: item.projectId,
@@ -973,6 +1148,46 @@ final class ViralCaptionsViewModel: ObservableObject {
                 cachedOutputExpiresAt: item.cachedOutputExpiresAt
             )
             return true
+        } catch let error as SubclipAPIError where error.code == "output_not_ready" {
+            if Date().timeIntervalSince(item.createdAt) >= LocalUploadQueueItem.incompleteRetentionDuration {
+                removeQueueItem(projectId: item.projectId)
+                alert = AppMessage(
+                    title: "Render expired",
+                    message: "This render did not finish within one hour and was removed from history."
+                )
+            } else {
+                updateQueueItem(projectId: item.projectId, status: "Processing")
+                alert = AppMessage(
+                    title: "Result is still processing",
+                    message: "Subclip is still preparing this video. Tap Check Result again shortly."
+                )
+            }
+            phase = .idle
+            statusMessage = "Choose a video to begin."
+            return false
+        } catch let error as SubclipAPIError {
+            switch error.disposition {
+            case .purchaseRequired:
+                alert = AppMessage(title: "Pass required", message: error.message)
+                passRequiredPaywallRequestID = UUID()
+            case .insufficientCredits:
+                alert = AppMessage(title: "Not enough AI credits", message: error.message)
+                lowCreditsPaywallRequestID = UUID()
+            case .authenticationRequired:
+                alert = AppMessage(title: "Session expired", message: "Please sign in again to continue.")
+                await auth.signOut()
+            case .notFound:
+                removeQueueItem(projectId: item.projectId)
+                alert = AppMessage(title: "Project unavailable", message: error.message)
+            case .processing:
+                updateQueueItem(projectId: item.projectId, status: "Processing")
+                alert = AppMessage(title: "Result is still processing", message: error.message)
+            case .retryable:
+                alert = AppMessage(title: "Please try again", message: error.message)
+            case .userActionRequired, .renderFailed, .unknown:
+                alert = AppMessage(title: "Could not open history item", message: error.message)
+            }
+            return false
         } catch {
             alert = AppMessage(title: "Could not open history item", message: error.localizedDescription)
             return false
@@ -1014,14 +1229,22 @@ final class ViralCaptionsViewModel: ObservableObject {
             }
 
             if status.status.lowercased() == "failed" {
-                throw SubclipAPIError(message: status.errorMessage ?? "Subclip render failed.")
+                throw SubclipAPIError(
+                    message: status.errorMessage ?? "Subclip render failed.",
+                    code: status.errorRetryable == true
+                        ? status.errorCode ?? "temporarily_unavailable"
+                        : status.errorCode ?? "render_failed"
+                )
             }
 
             let delaySeconds: UInt64 = attempt < 24 ? 5 : 15
             try await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
         }
 
-        throw SubclipAPIError(message: "Timed out while waiting for the render to finish.")
+        throw SubclipAPIError(
+            message: "The render is taking longer than expected. It is still saved in your history.",
+            code: "render_timeout"
+        )
     }
 
     private func defaultOutputName(for fileName: String) -> String {
@@ -1094,6 +1317,15 @@ final class ViralCaptionsViewModel: ObservableObject {
         downloadExpiresAt: Date? = nil,
         cachedOutputExpiresAt: Date? = nil
     ) {
+        let normalizedStatus = status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedStatus == "failed"
+            || normalizedStatus == "canceled"
+            || normalizedStatus == "cancelled"
+            || normalizedStatus == "awaiting_upload"
+            || normalizedStatus == "awaiting upload" {
+            removeQueueItem(projectId: projectId)
+            return
+        }
         guard let index = uploadQueue.firstIndex(where: { $0.projectId == projectId }) else { return }
         uploadQueue[index].status = status
         if let outputFileName {
@@ -1112,6 +1344,14 @@ final class ViralCaptionsViewModel: ObservableObject {
             uploadQueue[index].cachedOutputExpiresAt = cachedOutputExpiresAt
         }
         persistUploadQueue()
+    }
+
+    private func removeQueueItem(projectId: String) {
+        let previousCount = uploadQueue.count
+        uploadQueue.removeAll { $0.projectId == projectId }
+        if uploadQueue.count != previousCount {
+            persistUploadQueue()
+        }
     }
 
     private func localOutputCacheExpirationDate(from baseDate: Date = Date()) -> Date {

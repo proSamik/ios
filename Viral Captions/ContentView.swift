@@ -85,6 +85,7 @@ struct ContentView: View {
                       let userID = viewModel.auth.session?.user.id
                 else { return }
                 viewModel.activateLocalAccount(userID)
+                await viewModel.reconcileUploadQueue()
                 await viewModel.bootstrapMobileAccount()
                 await revenueCat.configure(
                     userID: userID,
@@ -153,9 +154,11 @@ struct ContentView: View {
 
     private func ensureBillingAccess() async -> Bool {
         guard let userID = viewModel.auth.session?.user.id else { return false }
-        if revenueCat.hasPremium { return true }
 
         do {
+            // The server owns pass validity. A locally cached RevenueCat value
+            // can outlive a one-day or one-week pass and must never bypass this
+            // check before a protected download or share.
             let access = try await viewModel.billingAccess()
             if access.hasPolarAccess || access.hasRevenueCatAccess { return true }
 
@@ -188,7 +191,11 @@ struct ContentView: View {
         guard let userID = viewModel.auth.session?.user.id else { return }
         do {
             let access = try await viewModel.billingAccess()
-            guard access.shouldShowRevenueCat && !access.hasPurchaseHistory else { return }
+            // Show the onboarding paywall for a first purchase, or when the
+            // user's previous pass has expired. If an active pass exists, keep
+            // the insufficient-credit explanation visible instead.
+            guard access.shouldShowRevenueCat,
+                  !access.hasPurchaseHistory || !access.hasAccess else { return }
 
             revenueCat.lockAccess()
             await revenueCat.configure(userID: userID)
@@ -2291,6 +2298,9 @@ private struct LocalQueueCard: View {
                 }
             }
         }
+        .task {
+            await viewModel.reconcileUploadQueue()
+        }
         .onChange(of: viewModel.outputRemoteURL) { _, remoteURL in
             if remoteURL != nil {
                 openingProjectID = nil
@@ -2349,7 +2359,7 @@ private struct LocalQueueRow: View {
                     }
                 }
 
-                if item.isResultReady {
+                if item.canOpenOrRefreshResult {
                     HStack(spacing: 8) {
                         if isOpening {
                             ProgressView()
@@ -2358,7 +2368,11 @@ private struct LocalQueueRow: View {
                         } else {
                             Image(systemName: "play.rectangle.fill")
                         }
-                        Text(isOpening ? "Preparing result…" : "Open result")
+                        Text(
+                            isOpening
+                                ? "Checking result…"
+                                : item.isResultReady ? "Open result" : "Check result"
+                        )
                     }
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .frame(maxWidth: .infinity)
@@ -2370,7 +2384,7 @@ private struct LocalQueueRow: View {
             .nativeGlassPanel(cornerRadius: 8, interactive: true)
         }
         .buttonStyle(.plain)
-        .disabled(!item.isResultReady || isOpening)
+        .disabled(!item.canOpenOrRefreshResult || isOpening)
     }
 }
 

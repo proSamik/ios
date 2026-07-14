@@ -176,7 +176,20 @@ struct SubclipAPIClient {
             request.httpBody = try JSONEncoder().encode(body)
         }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError {
+            throw SubclipAPIError(
+                message: error.code == .notConnectedToInternet
+                    ? "You appear to be offline. Reconnect and try again."
+                    : "Subclip could not be reached. Please try again.",
+                code: "network_error"
+            )
+        }
         guard let http = response as? HTTPURLResponse else {
             throw SubclipAPIError(message: "No HTTP response was received.")
         }
@@ -211,6 +224,62 @@ struct SubclipAPIError: LocalizedError {
         }
         return message
     }
+
+    var disposition: SubclipAPIErrorDisposition {
+        let normalizedCode = code?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        switch normalizedCode {
+        case "pass_required", "purchase_required", "subscription_required", "entitlement_required", "payment_required":
+            return .purchaseRequired
+        case "insufficient_credits", "not_enough_credits", "credits_required", "quota_exceeded":
+            return .insufficientCredits
+        case "session_expired", "authentication_required", "unauthorized", "invalid_api_key":
+            return .authenticationRequired
+        case "output_not_ready", "job_already_started", "job_processing":
+            return .processing
+        case "project_not_found":
+            return .notFound
+        case "unsupported_content_type", "file_too_large", "invalid_filename", "invalid_request", "video_missing", "invalid_media", "no_speech_detected":
+            return .userActionRequired
+        case "rate_limited", "billing_unavailable", "network_error", "temporarily_unavailable", "render_timeout", "render_capacity":
+            return .retryable
+        case "render_failed", "dynamic_captions_failed":
+            return .renderFailed
+        default:
+            break
+        }
+
+        if let statusCode, (500...599).contains(statusCode) {
+            return .retryable
+        }
+
+        switch statusCode {
+        case 401, 403:
+            return .authenticationRequired
+        case 402:
+            return .purchaseRequired
+        case 404:
+            return .notFound
+        case 408, 425, 429:
+            return .retryable
+        case 400, 413, 415, 422:
+            return .userActionRequired
+        default:
+            return .unknown
+        }
+    }
+}
+
+enum SubclipAPIErrorDisposition {
+    case purchaseRequired
+    case insufficientCredits
+    case authenticationRequired
+    case processing
+    case retryable
+    case userActionRequired
+    case notFound
+    case renderFailed
+    case unknown
 }
 
 private struct APIErrorPayload: Decodable {
@@ -280,6 +349,8 @@ struct JobStatusResponse: Decodable, Equatable {
     let outputReady: Bool
     let creditsUsed: Double?
     let errorMessage: String?
+    let errorCode: String?
+    let errorRetryable: Bool?
     let latestJobId: String?
     let renderId: String?
     let createdAt: String?

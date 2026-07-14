@@ -290,6 +290,8 @@ struct AppMessage: Identifiable, Equatable {
 }
 
 struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
+    static let incompleteRetentionDuration: TimeInterval = 60 * 60
+
     let id: UUID
     let projectId: String
     let fileName: String
@@ -342,6 +344,36 @@ struct LocalUploadQueueItem: Identifiable, Codable, Equatable {
 
     var isResultReady: Bool {
         status == "Completed" || status == "Ready — pass required"
+    }
+
+    var isTerminalFailure: Bool {
+        let normalized = normalizedHistoryStatus
+        return normalized == "failed" || normalized == "canceled" || normalized == "cancelled"
+    }
+
+    var isAbandonedUpload: Bool {
+        normalizedHistoryStatus == "awaiting upload"
+    }
+
+    private var normalizedHistoryStatus: String {
+        status
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+    }
+
+    func shouldRemainInHistory(at date: Date = Date()) -> Bool {
+        guard !isTerminalFailure, !isAbandonedUpload else { return false }
+        if !isResultReady,
+           date.timeIntervalSince(createdAt) >= Self.incompleteRetentionDuration {
+            return false
+        }
+        return true
+    }
+
+    var canOpenOrRefreshResult: Bool {
+        shouldRemainInHistory()
     }
 
     var isCachedOutputStillAvailable: Bool {
