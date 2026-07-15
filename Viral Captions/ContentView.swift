@@ -252,7 +252,13 @@ struct ContentView: View {
                 SettingsWorkspace(
                     viewModel: viewModel,
                     appearanceModeRaw: $appearanceModeRaw,
-                    onDownloadHistory: downloadHistory
+                    onDownloadHistory: downloadHistory,
+                    onViewPasses: {
+                        Task { await presentPassesFromSettings() }
+                    },
+                    onRestorePurchases: {
+                        Task { await restorePurchasesFromSettings() }
+                    }
                 )
                 .navigationTitle("Settings")
                 #if os(iOS)
@@ -289,6 +295,56 @@ struct ContentView: View {
             }
         }
     }
+
+    #if os(iOS)
+    private func presentPassesFromSettings() async {
+        guard let userID = viewModel.auth.session?.user.id else {
+            viewModel.alert = AppMessage(title: "Sign in required", message: "Sign in to view Subclip passes.")
+            return
+        }
+
+        await revenueCat.configure(
+            userID: userID,
+            email: viewModel.auth.session?.user.email,
+            displayName: viewModel.auth.session?.user.name
+        )
+        guard revenueCat.offering != nil else {
+            viewModel.alert = AppMessage(
+                title: "Passes unavailable",
+                message: revenueCat.errorMessage ?? "The App Store could not load the available passes. Please try again."
+            )
+            return
+        }
+        viewModel.alert = nil
+        isShowingRevenueCatPaywall = true
+    }
+
+    private func restorePurchasesFromSettings() async {
+        guard let userID = viewModel.auth.session?.user.id else {
+            viewModel.alert = AppMessage(title: "Sign in required", message: "Sign in to restore App Store purchases.")
+            return
+        }
+
+        await revenueCat.configure(
+            userID: userID,
+            email: viewModel.auth.session?.user.email,
+            displayName: viewModel.auth.session?.user.name
+        )
+        let restored = await revenueCat.restore()
+        if restored {
+            await viewModel.refreshQuota()
+            viewModel.alert = AppMessage(
+                title: "Purchases restored",
+                message: "Your App Store purchase has been restored successfully."
+            )
+        } else {
+            viewModel.alert = AppMessage(
+                title: "Nothing to restore",
+                message: revenueCat.errorMessage ?? "No restorable Subclip purchase was found for this Apple ID."
+            )
+        }
+    }
+    #endif
 
     private enum ImportMediaType {
         case video
@@ -921,6 +977,8 @@ private struct SettingsWorkspace: View {
     @ObservedObject var viewModel: ViralCaptionsViewModel
     @Binding var appearanceModeRaw: String
     var onDownloadHistory: (LocalUploadQueueItem) -> Void
+    var onViewPasses: () -> Void
+    var onRestorePurchases: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
@@ -936,6 +994,12 @@ private struct SettingsWorkspace: View {
 
                             VStack(spacing: 18) {
                                 LocalQueueCard(viewModel: viewModel, onOpen: onDownloadHistory)
+                                #if os(iOS)
+                                AppStorePurchasesCard(
+                                    onViewPasses: onViewPasses,
+                                    onRestorePurchases: onRestorePurchases
+                                )
+                                #endif
                             }
                             .frame(maxWidth: .infinity)
                         }
@@ -944,6 +1008,12 @@ private struct SettingsWorkspace: View {
                             AuthenticationCard(viewModel: viewModel, auth: viewModel.auth)
                             ThemeSettingsCard(selectionRaw: $appearanceModeRaw)
                             LocalQueueCard(viewModel: viewModel, onOpen: onDownloadHistory)
+                            #if os(iOS)
+                            AppStorePurchasesCard(
+                                onViewPasses: onViewPasses,
+                                onRestorePurchases: onRestorePurchases
+                            )
+                            #endif
                         }
                     }
                 }
@@ -956,6 +1026,82 @@ private struct SettingsWorkspace: View {
         }
     }
 }
+
+#if os(iOS)
+private struct AppStorePurchasesCard: View {
+    var onViewPasses: () -> Void
+    var onRestorePurchases: () -> Void
+
+    private let passes = [
+        ("24-Hour Day Pass", "50 AI credits", "sun.max.fill"),
+        ("7-Day Pass", "300 AI credits", "calendar.badge.clock"),
+        ("30-Day Pass", "300 AI credits", "calendar"),
+        ("Lifetime Pass", "1,000 AI credits", "infinity")
+    ]
+
+    var body: some View {
+        BrandCard {
+            VStack(alignment: .leading, spacing: 16) {
+                CardHeader(title: "Passes & Purchases", systemImage: "bag.fill")
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("App Store In-App Purchases")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(Brand.ink)
+                    Text("One-time passes—no recurring subscription.")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(Brand.slate)
+                }
+
+                VStack(spacing: 0) {
+                    ForEach(Array(passes.enumerated()), id: \.offset) { index, pass in
+                        HStack(spacing: 12) {
+                            Image(systemName: pass.2)
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Brand.navy)
+                                .frame(width: 34, height: 34)
+                                .background(Brand.navy.opacity(0.09), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pass.0)
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(Brand.ink)
+                                Text(pass.1)
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(Brand.slate)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 10)
+
+                        if index < passes.count - 1 {
+                            Divider()
+                                .padding(.leading, 46)
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .nativeGlassPanel(cornerRadius: 14)
+
+                Button(action: onViewPasses) {
+                    Label("View Passes & Prices", systemImage: "storefront.fill")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .frame(maxWidth: .infinity)
+                }
+                .nativeGlassButton(prominent: true)
+                .accessibilityHint("Opens the App Store purchase screen with all available Subclip passes")
+
+                Button(action: onRestorePurchases) {
+                    Label("Restore App Store Purchases", systemImage: "arrow.clockwise")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .frame(maxWidth: .infinity)
+                }
+                .nativeGlassButton()
+            }
+        }
+    }
+}
+#endif
 
 private struct AppBackground: View {
     var body: some View {
